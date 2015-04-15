@@ -53,7 +53,7 @@ static struct hisi_ion_type_id_table type_id_table[] = {
 static struct ion_platform_data hisi_ion_platform_data = {0};
 static struct ion_platform_heap hisi_ion_platform_heap[HISI_ION_HEAP_NUM] = {{0} };
 
-static struct ion_device *hisi_ion_device;
+static struct ion_device *hisi_ion_device = NULL;
 static struct ion_heap *hisi_ion_heap[HISI_ION_HEAP_NUM] = {NULL};
 
 int hisi_ion_get_heap_info(unsigned int id, struct ion_heap_info_data *data)
