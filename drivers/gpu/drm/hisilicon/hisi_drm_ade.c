@@ -14,6 +14,8 @@
 #include <linux/clk.h>
 #include <video/display_timing.h>
 
+#include <linux/hisi_ion.h>
+
 #include <drm/drmP.h>
 #include <drm/drm_crtc.h>
 #include <drm/drm_crtc_helper.h>
@@ -24,10 +26,15 @@
 #include "hisi_ade_reg.h"
 #include "hisi_ldi_reg.h"
 #include "hisi_drm_ade.h"
-
+#include "hisi_ade_cmdqueue.h"
 
 #define SC_MEDIA_RSTDIS		(0x530)
 #define SC_MEDIA_RSTEN		(0x52C)
+#define ADE_CMD_BUFF_SIZE_MAX   (ALIGN((SZ_1M), 8<<10))
+//#define ADE_CMD_BUFF_SIZE_MAX   100000
+#define IOMMU_PAGE_SIZE		(4<<10)
+#define ADE_ONLINE_PE		0xf000004
+#define ADE_INVAL_PATTERN_NUM   (0xffff) 
 
 enum {
 	LDI_TEST = 0,
@@ -37,10 +44,6 @@ enum {
 enum {
 	LDI_ISR_FRAME_END_INT           = 0x2,
 	LDI_ISR_UNDER_FLOW_INT          = 0x4
-};
-
-enum {
-	ADE_ISR1_RES_SWITCH_CMPL         = 0x80000000
 };
 
 enum {
@@ -96,11 +99,14 @@ enum {
 struct hisi_drm_ade_crtc {
 
 	int dpms;
+	int ade_irq;
+	int res_switch_cmpl;
 	u8 __iomem  *ade_base;
 	u8 __iomem  *media_base;
 	u32 ade_core_rate;
 	u32 media_noc_rate;
 	u32 x , y;
+	u32 frame_count;
 
 	struct drm_device  *drm_dev;
 	struct drm_crtc    crtc;
@@ -110,7 +116,20 @@ struct hisi_drm_ade_crtc {
 	struct clk *media_noc_clk;
 	struct clk *ade_pix_clk;
 
+	struct semaphore sem;
+	struct cmdfile_buffer   *cf;
+	struct ion_client *ion_client;
+	wait_queue_head_t wait_res_cmpl;
 };
+
+struct cmdfile_buffer{                                                                                             
+	void    *vaddr;
+	u32     paddr;
+	u32     cmd_len;
+	size_t     buff_size;
+	struct ion_handle *cmd_ion_handle;
+};
+
 
 static int hisi_drm_crtc_mode_set_base(struct drm_crtc *crtc, int x, int y,
 					struct drm_framebuffer *old_fb);
@@ -125,8 +144,8 @@ static void ade_init(struct hisi_drm_ade_crtc *crtc_ade)
 	cpu0_mask = ADE_ISR_DMA_ERROR;
 	cpu1_mask = ADE_ISR1_RES_SWITCH_CMPL;
 
-	writel(cpu0_mask, ade_base + INTR_MASK_CPU_0_REG);
-	writel(cpu1_mask, ade_base + INTR_MASK_CPU_1_REG);
+	writel(cpu0_mask, ade_base + INTR_MASK_CPU0_REG);
+	writel(cpu1_mask, ade_base + INTR_MASK_CPU1_REG);
 	set_TOP_CTL_frm_end_start(ade_base, 2);
 
 	/* disable wdma2 and wdma3 frame discard */
@@ -141,7 +160,7 @@ static void ade_init(struct hisi_drm_ade_crtc *crtc_ade)
 	set_TOP_CTL_clk_gate_en(ade_base, 1);
 
 	/* init ovly ctrl, if not,when the first
-	* frame is hybrid, will happen 32112222
+	* frame is hybrid, will happen
 	*/
 	writel(0, ade_base + ADE_OVLY_CTL_REG);
 
@@ -338,6 +357,18 @@ static void hisi_drm_crtc_mode_commit(struct drm_crtc *crtc)
 	DRM_DEBUG_DRIVER("mode_commit exit successfully.\n");
 }
 
+static void ade_overlay_commit_set_online_cmdq(u8* ade_base, struct cmdfile_buffer  *cf_buff, u32 pattern_num)
+{
+	DRM_DEBUG_DRIVER("ade_overlay_commit_set_online_cmdq enter succ, paddr=0x%x \n", cf_buff->paddr);
+
+	/* cfg reg to ADE TOP REG */
+	set_CMDQ_RDMA1_PE(ade_base, ADE_ONLINE_PE);
+	set_CMDQ_RDMA1_CTRL(ade_base, 0);
+	set_CMDQ_RDMA1_ADDR(ade_base, cf_buff->paddr);
+	set_CMDQ_RDMA1_LEN(ade_base, cf_buff->cmd_len / ADE_CMD_ALIGN_BYTE_LEN);
+	
+	DRM_DEBUG_DRIVER("ade_overlay_commit_set_online_cmdq exit succ, paddr=0x%x \n", cf_buff->paddr);
+}
 static int hisi_drm_crtc_mode_set_base(struct drm_crtc *crtc, int x, int y,
 					struct drm_framebuffer *old_fb)
 {
@@ -346,6 +377,8 @@ static int hisi_drm_crtc_mode_set_base(struct drm_crtc *crtc, int x, int y,
 	struct drm_gem_cma_object *obj = hisi_drm_fb_get_gem_obj(fb, 0);
 	struct hisi_drm_fb *hisi_fb = to_hisi_drm_fb(fb);
 
+	struct cmdfile_buffer *cf_buff = crtc_ade->cf;
+	
 	u8 __iomem *ade_base;
 	u32 stride;
 	u32 display_addr;
@@ -362,8 +395,8 @@ static int hisi_drm_crtc_mode_set_base(struct drm_crtc *crtc, int x, int y,
 	DRM_DEBUG_DRIVER("enter stride=%d,paddr=0x%x,display_addr=0x%x,%dx%d\n",
 			stride, (u32)obj->paddr, display_addr,
 			fb->width, fb_hight);
-
-	/* TOP setting */
+down(&crtc_ade->sem);
+	
 	writel(0, ade_base + ADE_WDMA2_SRC_CFG_REG);
 	writel(0, ade_base + ADE_SCL3_MUX_CFG_REG);
 	writel(0, ade_base + ADE_SCL1_MUX_CFG_REG);
@@ -374,43 +407,79 @@ static int hisi_drm_crtc_mode_set_base(struct drm_crtc *crtc, int x, int y,
 	writel(0, ade_base + ADE_OVLY1_TRANS_CFG_REG);
 	writel(0, ade_base + ADE_CTRAN5_TRANS_CFG_REG);
 	writel(0, ade_base + ADE_OVLY_CTL_REG);
-	writel(0, ade_base + ADE_SOFT_RST_SEL0_REG);
-	writel(0, ade_base + ADE_SOFT_RST_SEL1_REG);
-	set_TOP_SOFT_RST_SEL0_disp_rdma(ade_base, 1);
-	set_TOP_SOFT_RST_SEL0_ctran5(ade_base, 1);
-	set_TOP_SOFT_RST_SEL0_ctran6(ade_base, 1);
-	writel(0, ade_base + ADE_RELOAD_DIS0_REG);
-	writel(0, ade_base + ADE_RELOAD_DIS1_REG);
-	writel(TOP_DISP_CH_SRC_RDMA, ade_base + ADE_DISP_SRC_CFG_REG);
+	
+	set_TOP_DISP_SRC_CFG(ade_base, TOP_DISP_CH_SRC_RDMA);
+	set_TOP_SOFT_RST_SEL0(ade_base, 0);
+	set_TOP_RELOAD_DIS0(ade_base, 0);
+	set_TOP_SOFT_RST_SEL1(ade_base, 0);
+	set_TOP_RELOAD_DIS1(ade_base, 0); 
 
+	/* set offline axi_mux */
+	writel(0x763f, ade_base + ADE_DMA_AXI_MUX_REG);
+
+	set_TOP_SOFT_RST_SEL0_cmdq1_rdma(ade_base, 1);
+	set_TOP_RELOAD_DIS0_cmdq1_rdma(ade_base, 0); 
+
+	/********************************DISP DMA**************************/
+
+	/* set disp channel into AXI0 */
+	set_TOP_DMA_AXI_MUX(ade_base, OVERLAY_PIPE_ADE_DISP, OVERLAY_PIPE_TYPE_ONLINE);
+
+	ade_cmdq_wr_rdma_pe_cmd(RD_CH_DISP_PE_REG, OVERLAY_PIPE_TYPE_ONLINE, ADE_ROT_NOP);
 	/* DISP DMA setting */
 	if (16 == fb->bits_per_pixel)
-		writel((ADE_RGB_565 << 16) & 0x1f0000,
-		    ade_base + RD_CH_DISP_CTRL_REG);
+		ade_cmdq_wr_cmd(RD_CH_DISP_CTRL_REG, (ADE_RGB_565 << 16) & 0x1f0000);
 	else if (32 == fb->bits_per_pixel)
-		writel((ADE_ABGR_8888 << 16) & 0x1f0000,
-		    ade_base + RD_CH_DISP_CTRL_REG);
-	writel(display_addr, ade_base + RD_CH_DISP_ADDR_REG);
-	writel((fb_hight << 16) | stride, ade_base + RD_CH_DISP_SIZE_REG);
-	writel(stride, ade_base + RD_CH_DISP_STRIDE_REG);
-	writel(fb_hight * stride, ade_base + RD_CH_DISP_SPACE_REG);
-	writel(1, ade_base + RD_CH_DISP_EN_REG);
+		ade_cmdq_wr_cmd(RD_CH_DISP_CTRL_REG, (ADE_ABGR_8888 << 16) & 0x1f0000);
+	ade_cmdq_wr_cmd(RD_CH_DISP_ADDR_REG, display_addr);
 
-	/* ctran5 setting */
-	writel(1, ade_base + ADE_CTRAN5_DIS_REG);
-	writel(fb->width * fb_hight - 1,
-		ade_base + ADE_CTRAN5_IMAGE_SIZE_REG);
+	ade_cmdq_wr_cmd(RD_CH_DISP_SIZE_REG, (fb_hight << 16) | stride);
+	ade_cmdq_wr_cmd(RD_CH_DISP_STRIDE_REG, stride);
+	ade_cmdq_wr_cmd(RD_CH_DISP_SPACE_REG, fb_hight * stride);
 
-	/* ctran6 setting */
-	writel(1, ade_base + ADE_CTRAN6_DIS_REG);
-	writel(fb->width * fb_hight - 1,
-		ade_base + ADE_CTRAN6_IMAGE_SIZE_REG);
+	ade_cmdq_wr_cmd2buff(cf_buff->vaddr, &(cf_buff->cmd_len));
+	ade_cmdq_wr_cmd(RD_CH_DISP_EN_REG, 1);
+	ade_cmdq_wr_cmd2buff(cf_buff->vaddr, &(cf_buff->cmd_len));
 
-	/* enable ade and ldi */
+	/************************ ctran5 *************/ 
+	ade_cmdq_wr_cmd(ADE_CTRAN5_DIS_REG, ADE_ENABLE);
+	ade_cmdq_wr_cmd2buff(cf_buff->vaddr, &(cf_buff->cmd_len));
+	ade_cmdq_wr_cmd(ADE_CTRAN5_IMAGE_SIZE_REG, fb->width * fb_hight - 1);
+	ade_cmdq_wr_cmd(ADE_CTRAN5_CFG_OK_REG, 1);
+	ade_cmdq_wr_cmd2buff(cf_buff->vaddr, &(cf_buff->cmd_len));
+
+	/**************************CTRAN6***************************/
+	ade_cmdq_wr_cmd(ADE_CTRAN6_DIS_REG, 1);                                                                   
+	ade_cmdq_wr_cmd2buff(cf_buff->vaddr, &(cf_buff->cmd_len));
+	ade_cmdq_wr_cmd(ADE_CTRAN6_IMAGE_SIZE_REG, fb->width * fb_hight - 1);
+	ade_cmdq_wr_cmd(ADE_CTRAN6_CFG_OK_REG, 1);
+	ade_cmdq_wr_cmd2buff(cf_buff->vaddr, &(cf_buff->cmd_len));
+
+	ade_cmdq_wr_eof_cmd(cf_buff->vaddr, &(cf_buff->cmd_len));
+
+	mb();
+	
+	/* set ONLINE cmdQueue RDMA, 0xffff is invalid value */
+	ade_overlay_commit_set_online_cmdq(ade_base, cf_buff, ADE_INVAL_PATTERN_NUM);
+
+	set_TOP_INTR_MASK_CPU1(ade_base, ADE_ISR1_RES_SWITCH_CMPL);
+
+	crtc_ade->res_switch_cmpl = 0;
 	writel(ADE_ENABLE, ade_base + ADE_EN_REG);
+	printk("kkkkkkkkkkkkkXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX\n");
+
+	if (wait_event_interruptible_timeout(crtc_ade->wait_res_cmpl,
+					crtc_ade->res_switch_cmpl, HZ) <= 0) {
+	printk("kkkkkkkkkkkkk000000000display:wait_event_interruptible_timeout res_switch_cmpl timeout!\n");
+	
+		DRM_DEBUG_DRIVER("display:wait_event_interruptible_timeout res_switch_cmpl timeout!\n");
+	}
+
 	set_TOP_CTL_frm_end_start(ade_base, 1);
 	set_LDI_CTRL_ldi_en(ade_base, ADE_ENABLE);
 
+up(&crtc_ade->sem);
+	
 	DRM_DEBUG_DRIVER("mode_set_base exit successfully.\n");
 	return 0;
 }
@@ -469,6 +538,87 @@ static int hisi_drm_crtc_create(struct hisi_drm_ade_crtc *crtc_ade)
 	return 0;
 }
 
+static int hisi_drm_ade_cmdfile_buff_init(struct platform_device *pdev,
+					struct hisi_drm_ade_crtc *crtc_ade)
+{
+	struct cmdfile_buffer *cf_buff;
+	struct ion_client *ade_ion_client;
+	struct ion_device *ion_dev = NULL;
+	
+	u32     heap_mask = 0;
+	u32     heap_flag = 0;
+
+	cf_buff = devm_kzalloc(&pdev->dev, sizeof(*cf_buff), GFP_KERNEL);
+	cf_buff->buff_size = ADE_CMD_BUFF_SIZE_MAX;
+	cf_buff->cmd_len   = 0;
+	
+	ion_dev = get_ion_device();
+	ade_ion_client = ion_client_create(ion_dev, "fb_ion");
+	if (ade_ion_client == NULL) {
+		DRM_ERROR("create ion client create fail \n");
+		return -EINVAL;
+	}
+	
+	/* alloc un-cache memory for cmdfile,
+	 * if heap_flag = ION_FLAG_CACHED | ION_FLAG_CACHED_NEEDS_SYNC;
+	* memory will be cache.
+	*/
+
+	heap_mask = ION_HEAP(ION_OVERLAY_HEAP_ID);
+	heap_flag = 0;
+
+	/* get cmd buffer handle,  */
+	cf_buff->cmd_ion_handle = ion_alloc(ade_ion_client,
+		cf_buff->buff_size, IOMMU_PAGE_SIZE, heap_mask, heap_flag);
+	if (IS_ERR(cf_buff->cmd_ion_handle)) {
+		cf_buff->cmd_ion_handle = NULL;
+		DRM_ERROR("ion_alloc alloc handle error \n");
+		return -EINVAL;
+	}
+
+	/* get cmd buffer phy addr, io addr for IP */
+	if (ion_phys(ade_ion_client, cf_buff->cmd_ion_handle,
+		(ion_phys_addr_t *)(&cf_buff->paddr), &cf_buff->buff_size) < 0) {
+		DRM_ERROR("ion_alloc alloc handle error \n");
+		cf_buff->paddr = 0xdeadbeaf;
+		return -EINVAL;
+	}
+
+	/* get cmf buffer virturl addr */
+	cf_buff->vaddr = ion_map_kernel(ade_ion_client, cf_buff->cmd_ion_handle);
+	if (IS_ERR(cf_buff->vaddr)) {
+		DRM_ERROR("ion_alloc alloc handle error \n");
+		return -EINVAL;
+	}
+	
+	crtc_ade->cf = cf_buff;
+	crtc_ade->ion_client = ade_ion_client;
+	
+	return 0;
+}
+
+static irqreturn_t hisi_ade_irq_thread(int irq, void *dev)
+{
+	struct hisi_drm_ade_crtc *crtc_ade = dev;
+	u8 __iomem *ade_base;
+	u32 temp = 0;
+	
+	ade_base = crtc_ade->ade_base;
+
+	temp = readl(ade_base + INTR_MASK_STATE_CPU1_REG);
+	
+	printk("ade_isr: intr_mask_state_1 = 0x%x \n",temp);
+	
+	if ((temp & ADE_ISR1_RES_SWITCH_CMPL) == ADE_ISR1_RES_SWITCH_CMPL) {
+		writel(ADE_ISR1_RES_SWITCH_CMPL, ade_base + INTR_CLEAR_CPU1_REG);
+		crtc_ade->res_switch_cmpl = 1;
+	printk("kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk\n");
+		wake_up_interruptible_all(&crtc_ade->wait_res_cmpl);
+	}
+	
+	return IRQ_HANDLED;
+}
+
 static int hisi_drm_ade_dts_parse(struct platform_device *pdev,
 				    struct hisi_drm_ade_crtc *crtc_ade)
 {
@@ -494,6 +644,19 @@ static int hisi_drm_ade_dts_parse(struct platform_device *pdev,
 		ret = PTR_ERR(crtc_ade->media_base);
 	}
 
+	crtc_ade->ade_irq = platform_get_irq(pdev, 0);
+	if (crtc_ade->ade_irq < 0)
+		return crtc_ade->ade_irq;
+	
+	ret = devm_request_threaded_irq(&pdev->dev, crtc_ade->ade_irq,
+			NULL, hisi_ade_irq_thread,
+			IRQF_ONESHOT,
+			"hisi_ade", crtc_ade);
+	if (ret < 0) {
+		dev_err(&pdev->dev, "failed to request alarm irq: %d\n", ret);
+		return ret;
+	}
+	
 	crtc_ade->ade_core_clk = devm_clk_get(&pdev->dev, "clk_ade_core");
 	if (crtc_ade->ade_core_clk == NULL) {
 		DRM_ERROR("failed to parse the ADE_CORE\n");
@@ -541,18 +704,27 @@ static int hisi_ade_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	}
 
+	sema_init(&crtc_ade->sem, 1);
+	init_waitqueue_head(&crtc_ade->wait_res_cmpl);
+
 	crtc_ade->drm_dev = dev_get_platdata(&pdev->dev);
 	if (crtc_ade->drm_dev == NULL) {
 		DRM_ERROR("no platform data\n");
 		return -EINVAL;
 	}
-
+	
 	ret = hisi_drm_ade_dts_parse(pdev, crtc_ade);
 	if (ret) {
 		DRM_ERROR("failed to dts parse\n");
 		return ret;
 	}
-
+	
+	ret = hisi_drm_ade_cmdfile_buff_init(pdev, crtc_ade);
+	if (ret) {
+		DRM_ERROR("failed to cmd init\n");
+		return ret;
+	}
+	
 	ret = hisi_drm_crtc_create(crtc_ade);
 	if (ret) {
 		DRM_ERROR("failed to crtc creat\n");

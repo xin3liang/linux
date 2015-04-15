@@ -244,4 +244,9 @@ static struct platform_driver hisi_ion_driver = {
 	},
 };
 
-module_platform_driver(hisi_ion_driver);
+static int __init hisi_ion_init(void)
+{
+         return platform_driver_register(&hisi_ion_driver);
+ }
+
+subsys_initcall(hisi_ion_init);
