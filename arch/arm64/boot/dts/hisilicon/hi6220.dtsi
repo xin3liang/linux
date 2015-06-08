@@ -606,6 +606,8 @@
 				      <0x0 0xf4410000 0x0 0x1000>;
 				reg-names = "ade_base",
 					    "media_base";
+				interrupts = <0 115 4>; /* ldi interrrupt */
+
 				clocks = <&clock_media HI6220_ADE_CORE>,
 					 <&clock_media HI6220_CODEC_JPEG>,
 					 <&clock_media HI6220_ADE_PIX_SRC>,
