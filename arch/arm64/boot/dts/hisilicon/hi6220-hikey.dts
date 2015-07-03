@@ -10,6 +10,8 @@
 /memreserve/ 0x0740f000 0x1000;
 
 #include "hi6220.dtsi"
+#include "hikey-gpio.dtsi"
+#include "hikey-pinctrl.dtsi"
 
 / {
 	model = "HiKey Development Board";
