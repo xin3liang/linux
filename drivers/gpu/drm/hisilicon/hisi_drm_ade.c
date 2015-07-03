@@ -115,8 +115,47 @@ struct hisi_drm_ade_crtc {
 	bool power_on;
 };
 
+/* ade-format info: */
+struct ade_format {
+	u32 pixel_format;
+	enum ADE_FORMAT ade_format;
+};
+
+static const struct ade_format formats[] = {
+	/* 16bpp RGB: */
+	{ DRM_FORMAT_RGB565, ADE_RGB_565}, /* RGB16-565 */
+	{ DRM_FORMAT_BGR565, ADE_BGR_565}, /* BGR16-565 */
+
+	/* 24bpp RGB: */
+	{ DRM_FORMAT_RGB888, ADE_RGB_888}, /* RGB24-888 */
+	{ DRM_FORMAT_BGR888, ADE_BGR_888}, /* BGR24-888 */
+
+	/* 32bpp [A]RGB: */
+	{ DRM_FORMAT_XRGB8888, ADE_XRGB_8888}, /* XRGB24-8888 */
+	{ DRM_FORMAT_XBGR8888, ADE_XBGR_8888}, /* XBGR24-8888 */
+	{ DRM_FORMAT_RGBA8888, ADE_RGBA_8888}, /* RGBA32-8888 */
+	{ DRM_FORMAT_BGRA8888, ADE_BGRA_8888}, /* BGRA32-8888 */
+	{ DRM_FORMAT_ARGB8888, ADE_ARGB_8888}, /* ARGB32-8888 */
+	{ DRM_FORMAT_ABGR8888, ADE_ABGR_8888}, /* ABGR32-8888 */
+};
+
+
 static void ldi_init(struct hisi_drm_ade_crtc *crtc_ade);
 static void hisi_update_scanout(struct hisi_drm_ade_crtc *crtc_ade, int x, int y);
+
+/* convert from fourcc format to ade format */
+u32 hisi_get_ade_format(u32 pixel_format)
+{
+	int i = 0;
+
+	for (i = 0; i < ARRAY_SIZE(formats); i++)
+		if (formats[i].pixel_format == pixel_format)
+			return formats[i].ade_format;
+
+	/* not found, return rgb565 */
+	DRM_ERROR("Not found pixel format!!fourcc_format= %d\n", pixel_format);
+	return ADE_RGB_565;
+}
 
 static void ade_init(struct hisi_drm_ade_crtc *crtc_ade)
 {
@@ -534,16 +573,20 @@ static void hisi_update_scanout(struct hisi_drm_ade_crtc *crtc_ade, int x, int y
 	u32 display_addr;
 	u32 offset;
 	u32 fb_hight;
+	u32 format;
 
 	stride = fb->pitches[0];
 	offset = y * fb->pitches[0] + x * (fb->bits_per_pixel >> 3);
 	display_addr = (u32)obj->paddr + offset;
 	fb_hight = hisi_fb->is_fbdev_fb ? fb->height / HISI_NUM_FRAMEBUFFERS
 			: fb->height;
+	format = hisi_get_ade_format(fb->pixel_format);
 
 	DRM_DEBUG_DRIVER("enter stride=%d,paddr=0x%x,display_addr=0x%x,%dx%d\n",
 			stride, (u32)obj->paddr, display_addr,
 			fb->width, fb_hight);
+	DRM_INFO("update sanout: pixel_format=%d(%s)\n",
+			format, drm_get_format_name(fb->pixel_format));
 
 	/* TOP setting */
 	writel(0, ade_base + ADE_WDMA2_SRC_CFG_REG);
@@ -566,12 +609,7 @@ static void hisi_update_scanout(struct hisi_drm_ade_crtc *crtc_ade, int x, int y
 	writel(TOP_DISP_CH_SRC_RDMA, ade_base + ADE_DISP_SRC_CFG_REG);
 
 	/* DISP DMA setting */
-	if (16 == fb->bits_per_pixel)
-		writel((ADE_RGB_565 << 16) & 0x1f0000,
-		    ade_base + RD_CH_DISP_CTRL_REG);
-	else if (32 == fb->bits_per_pixel)
-		writel((ADE_ARGB_8888 << 16) & 0x1f0000,
-		    ade_base + RD_CH_DISP_CTRL_REG);
+	writel((format << 16) & 0x1f0000, ade_base + RD_CH_DISP_CTRL_REG);
 	writel(display_addr, ade_base + RD_CH_DISP_ADDR_REG);
 	writel((fb_hight << 16) | stride, ade_base + RD_CH_DISP_SIZE_REG);
 	writel(stride, ade_base + RD_CH_DISP_STRIDE_REG);
