@@ -296,7 +296,7 @@ int i2c_dw_init(struct dw_i2c_dev *dev)
 	}
 
 	input_clock_khz = dev->get_clk_rate_khz(dev);
-
+#if 0
 	reg = dw_readl(dev, DW_IC_COMP_TYPE);
 	if (reg == ___constant_swab32(DW_IC_COMP_TYPE_VALUE)) {
 		/* Configure register endianess access */
@@ -311,7 +311,7 @@ int i2c_dw_init(struct dw_i2c_dev *dev)
 			dev->release_lock(dev);
 		return -ENODEV;
 	}
-
+#endif 
 	/* Disable the adapter */
 	__i2c_dw_enable(dev, false);
 
@@ -345,12 +345,12 @@ int i2c_dw_init(struct dw_i2c_dev *dev)
 		lcnt = dev->fs_lcnt;
 	} else {
 		hcnt = i2c_dw_scl_hcnt(input_clock_khz,
-					600,	/* tHD;STA = tHIGH = 0.6 us */
+					700,	/* tHD;STA = tHIGH = 0.6 us */
 					sda_falling_time,
 					0,	/* 0: DW default, 1: Ideal */
 					0);	/* No offset */
 		lcnt = i2c_dw_scl_lcnt(input_clock_khz,
-					1300,	/* tLOW = 1.3 us */
+					1400,	/* tLOW = 1.3 us */
 					scl_falling_time,
 					0);	/* No offset */
 	}
@@ -368,6 +368,7 @@ int i2c_dw_init(struct dw_i2c_dev *dev)
 				"Hardware too old to adjust SDA hold time.");
 	}
 
+	dw_writel(dev, dev->sda_hold_time, DW_IC_SDA_HOLD);
 	/* Configure Tx/Rx FIFO threshold levels */
 	dw_writel(dev, dev->tx_fifo_depth / 2, DW_IC_TX_TL);
 	dw_writel(dev, 0, DW_IC_RX_TL);
