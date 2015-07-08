@@ -15,6 +15,7 @@
 
 / {
 	model = "HiKey Development Board";
+	hisi,boardid = <0 0 4 3>;
 	compatible = "hisilicon,hi6220-hikey";
 	#address-cells = <2>;
 	#size-cells = <2>;
