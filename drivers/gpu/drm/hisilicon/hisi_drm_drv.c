@@ -15,6 +15,7 @@
 #include <drm/drmP.h>
 #include <drm/drm_fb_helper.h>
 #include <drm/drm_gem_cma_helper.h>
+#include <drm/drm_atomic_helper.h>
 
 #include "hisi_drm_ade.h"
 #include "hisi_drm_dsi.h"
@@ -94,13 +95,30 @@ static int hisi_drm_unload(struct drm_device *drm_dev)
 	return 0;
 }
 
+static const struct drm_mode_config_funcs hisi_drm_mode_config_funcs = {
+	.fb_create = hisi_drm_fb_create,
+	.atomic_check = drm_atomic_helper_check,
+	.atomic_commit = drm_atomic_helper_commit,
+};
+
+static void hisi_drm_mode_config_init(struct drm_device *dev)
+{
+	dev->mode_config.min_width = 0;
+	dev->mode_config.min_height = 0;
+
+	dev->mode_config.max_width = 2048;
+	dev->mode_config.max_height = 2048;
+
+	dev->mode_config.funcs = &hisi_drm_mode_config_funcs;
+}
+
 static int hisi_drm_load(struct drm_device *drm_dev, unsigned long flags)
 {
 	int ret;
 	struct hisi_drm_private *private;
 
 	/* debug setting */
-	drm_debug = DRM_UT_DRIVER|DRM_UT_KMS|DRM_UT_CORE|DRM_UT_PRIME; 
+	drm_debug = DRM_UT_DRIVER|DRM_UT_KMS|DRM_UT_CORE|DRM_UT_PRIME|DRM_UT_ATOMIC; 
 	DRM_DEBUG_DRIVER("enter.\n");
 
 	private = kzalloc(sizeof(struct hisi_drm_private), GFP_KERNEL);
@@ -120,6 +138,8 @@ static int hisi_drm_load(struct drm_device *drm_dev, unsigned long flags)
 		DRM_ERROR("failed to initialize sub drivers\n");
 		goto err_sub_drivers_init;
 	}
+
+	//drm_mode_config_reset(dev);
 
 	/* only support one crtc now */
 	ret = drm_vblank_init(drm_dev, 1);

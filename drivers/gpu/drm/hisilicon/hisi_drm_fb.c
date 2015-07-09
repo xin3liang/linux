@@ -94,7 +94,7 @@ struct hisi_drm_fb *hisi_drm_fb_alloc(struct drm_device *dev,
  * If your hardware has special alignment or pitch requirements these should be
  * checked before calling this function.
  */
-static struct drm_framebuffer *hisi_drm_fb_create(struct drm_device *dev,
+struct drm_framebuffer *hisi_drm_fb_create(struct drm_device *dev,
 	struct drm_file *file_priv, struct drm_mode_fb_cmd2 *mode_cmd)
 {
 	struct hisi_drm_fb *hisi_fb;
@@ -168,19 +168,4 @@ struct drm_gem_cma_object *hisi_drm_fb_get_gem_obj(struct drm_framebuffer *fb,
 		return NULL;
 
 	return hisi_fb->obj[plane];
-}
-
-static const struct drm_mode_config_funcs hisi_drm_mode_config_funcs = {
-	.fb_create = hisi_drm_fb_create,
-};
-
-void hisi_drm_mode_config_init(struct drm_device *dev)
-{
-	dev->mode_config.min_width = 0;
-	dev->mode_config.min_height = 0;
-
-	dev->mode_config.max_width = 2048;
-	dev->mode_config.max_height = 2048;
-
-	dev->mode_config.funcs = &hisi_drm_mode_config_funcs;
 }

@@ -20,6 +20,7 @@
 #include <drm/drm_gem_cma_helper.h>
 #include <drm/drm_plane_helper.h>
 #include <drm/drm_fb_helper.h>
+#include <drm/drm_atomic_helper.h>
 
 #include "hisi_drm_fb.h"
 #include "hisi_ade_reg.h"
@@ -32,6 +33,9 @@
 
 #define SC_MEDIA_RSTDIS		(0x530)
 #define SC_MEDIA_RSTEN		(0x52C)
+
+#define to_ade_crtc(c)		container_of(c, struct hisi_ade_crtc, base)
+#define to_ade_plane(p)		container_of(p, struct hisi_ade_plane, base)
 
 enum {
 	LDI_TEST = 0,
@@ -67,17 +71,21 @@ enum {
 	ADE_OUT_RGB_888
 };
 
+/*
+ * ADE read as big-endian, so revert the
+ * rgb order described in the SoC datasheet
+ * */
 enum ADE_FORMAT {
-	ADE_RGB_565 = 0,
 	ADE_BGR_565,
-	ADE_XRGB_8888,
+	ADE_RGB_565,
 	ADE_XBGR_8888,
-	ADE_ARGB_8888,
+	ADE_XRGB_8888,
 	ADE_ABGR_8888,
-	ADE_RGBA_8888,
+	ADE_ARGB_8888,
 	ADE_BGRA_8888,
+	ADE_RGBA_8888,
+	ADE_BGR_888,
 	ADE_RGB_888,
-	ADE_BGR_888 = 9,
 	ADE_YUYV_I = 16,
 	ADE_YVYU_I,
 	ADE_UYVY_I,
@@ -96,22 +104,47 @@ enum {
 	ADE_ISR_DMA_ERROR               = 0x2000000
 };
 
+enum ade_channel {
+	ADE_CH1 = 0,
+	ADE_CH2,
+	ADE_CH3,
+	ADE_CH4,
+	ADE_CH5,
+	ADE_CH6,
+	ADE_DISP,
 
-struct hisi_drm_ade_crtc {
-	u8 __iomem  *ade_base;
-	u8 __iomem  *media_base;
+	ADE_CH_NUM
+};
+
+struct hisi_ade_plane {
+	struct drm_plane base;
+	void *ctx;
+	u32 ch;
+};
+
+struct hisi_ade_crtc {
+	struct drm_crtc base;
+	void *ctx;
+	struct drm_display_mode *dmode;
+	bool enable;
+};
+
+struct hisi_display_context {
+	void __iomem  *ade_base;
+	void __iomem  *media_base;
+
 	u32 ade_core_rate;
 	u32 media_noc_rate;
 
 	struct drm_device  *drm_dev;
-	struct drm_crtc    crtc;
-	struct drm_display_mode *dmode;
 
 	struct clk *ade_core_clk;
 	struct clk *media_noc_clk;
 	struct clk *ade_pix_clk;
 
-	bool enable;
+	struct hisi_ade_crtc *ade_crtc;
+	struct hisi_ade_plane *plane[ADE_CH_NUM];
+
 	bool power_on;
 };
 
@@ -139,14 +172,29 @@ static const struct ade_format formats[] = {
 	{ DRM_FORMAT_ABGR8888, ADE_ABGR_8888}, /* ABGR32-8888 */
 };
 
+static const uint32_t plane_formats[] = {
+	/* 16bpp RGB: */
+	DRM_FORMAT_RGB565,
+	DRM_FORMAT_BGR565,
 
-static void ldi_init(struct hisi_drm_ade_crtc *crtc_ade);
-static void hisi_update_scanout(struct hisi_drm_ade_crtc *crtc_ade, int x, int y);
+	/* 24bpp RGB: */
+	DRM_FORMAT_RGB888,
+	DRM_FORMAT_BGR888,
+
+	/* 32bpp [A]RGB: */
+	DRM_FORMAT_XRGB8888,
+	DRM_FORMAT_XBGR8888,
+	DRM_FORMAT_RGBA8888,
+	DRM_FORMAT_BGRA8888,
+	DRM_FORMAT_ARGB8888,
+	DRM_FORMAT_ABGR8888,
+};
+
 
 /* convert from fourcc format to ade format */
 u32 hisi_get_ade_format(u32 pixel_format)
 {
-	int i = 0;
+	int i;
 
 	for (i = 0; i < ARRAY_SIZE(formats); i++)
 		if (formats[i].pixel_format == pixel_format)
@@ -157,9 +205,9 @@ u32 hisi_get_ade_format(u32 pixel_format)
 	return ADE_RGB_565;
 }
 
-static void ade_init(struct hisi_drm_ade_crtc *crtc_ade)
+static void ade_init(struct hisi_display_context *ctx)
 {
-	u8 __iomem *ade_base = crtc_ade->ade_base;
+	void __iomem *ade_base = ctx->ade_base;
 
 	/* enable clk gate */
 	set_TOP_CTL_clk_gate_en(ade_base, 1);
@@ -168,91 +216,9 @@ static void ade_init(struct hisi_drm_ade_crtc *crtc_ade)
 	set_TOP_CTL_frm_end_start(ade_base, 1);
 }
 
-static int ade_power_up(struct hisi_drm_ade_crtc *crtc_ade)
+static void ldi_init(struct hisi_display_context *ctx, struct drm_display_mode *mode)
 {
-	u8 __iomem *media_base = crtc_ade->media_base;
-	int ret;
-
-	ret = clk_set_rate(crtc_ade->ade_core_clk, crtc_ade->ade_core_rate);
-	if (ret) {
-		DRM_ERROR("clk_set_rate ade_core_rate error\n");
-		return ret;
-	}
-	ret = clk_set_rate(crtc_ade->media_noc_clk, crtc_ade->media_noc_rate);
-	if (ret) {
-		DRM_ERROR("media_noc_clk media_noc_rate error\n");
-		return ret;
-	}
-	ret = clk_prepare_enable(crtc_ade->media_noc_clk);
-	if (ret) {
-		DRM_ERROR("fail to clk_prepare_enable media_noc_clk\n");
-		return ret;
-	}
-
-	writel(0x20, media_base + SC_MEDIA_RSTDIS);
-
-	ret = clk_prepare_enable(crtc_ade->ade_core_clk);
-	if (ret) {
-		DRM_ERROR("fail to clk_prepare_enable ade_core_clk\n");
-		return ret;
-	}
-	crtc_ade->power_on = true;
-	return 0;
-}
-
-static int ade_power_down(struct hisi_drm_ade_crtc *crtc_ade)
-{
-	u8 __iomem *media_base = crtc_ade->media_base;
-
-	clk_disable_unprepare(crtc_ade->ade_core_clk);
-	writel(0x20, media_base + SC_MEDIA_RSTEN);
-	clk_disable_unprepare(crtc_ade->media_noc_clk);
-	crtc_ade->power_on = false;
-	return 0;
-}
-
-static int hisi_drm_crtc_ade_enable(struct hisi_drm_ade_crtc *crtc_ade)
-{
-	int ret;
-
-	if (!crtc_ade->power_on) {
-		ret = ade_power_up(crtc_ade);
-		if (ret) {
-			DRM_ERROR("failed to initialize ade clk\n");
-			return ret;
-		}
-	}
-
-	ade_init(crtc_ade);
-	ldi_init(crtc_ade);
-	drm_crtc_vblank_on(&crtc_ade->crtc);
-	if (crtc_ade->crtc.primary->fb)
-		hisi_update_scanout(crtc_ade, 0, 0);
-	return 0;
-}
-
-static int hisi_drm_crtc_ade_disable(struct hisi_drm_ade_crtc *crtc_ade)
-{
-	int ret;
-	u8 __iomem *ade_base = crtc_ade->ade_base;
-
-	drm_crtc_vblank_off(&crtc_ade->crtc);
-	set_LDI_CTRL_ldi_en(ade_base, ADE_DISABLE);
-	/* dsi pixel off */
-	set_reg(ade_base + LDI_HDMI_DSI_GT_REG, 0x1, 1, 0);
-	ret = ade_power_down(crtc_ade);
-	if (ret) {
-		DRM_ERROR("failed to initialize ade clk\n");
-		return ret;
-	}
-
-	return 0;
-}
-
-static void ldi_init(struct hisi_drm_ade_crtc *crtc_ade)
-{
-	struct drm_display_mode *mode = crtc_ade->dmode;
-	void __iomem *ade_base = crtc_ade->ade_base;
+	void __iomem *ade_base = ctx->ade_base;
 	u32 hfp, hbp, hsw, vfp, vbp, vsw;
 	u32 plr_flags;
 
@@ -303,272 +269,59 @@ static void ldi_init(struct hisi_drm_ade_crtc *crtc_ade)
 	set_LDI_CTRL_ldi_en(ade_base, ADE_ENABLE);
 }
 
-/* -----------------------------------------------------------------------------
- * CRTC
- */
-
-#define to_hisi_crtc(c)  container_of(c, struct hisi_drm_ade_crtc, crtc)
-
-static void hisi_drm_crtc_dpms(struct drm_crtc *crtc, int mode)
+static int ade_power_up(struct hisi_display_context *ctx)
 {
-	struct hisi_drm_ade_crtc *crtc_ade = to_hisi_crtc(crtc);
-	bool enable = (mode == DRM_MODE_DPMS_ON);
-
-	DRM_DEBUG_DRIVER("crtc_dpms  enter successfully.\n");
-	if (crtc_ade->enable == enable)
-		return;
-
-	if (enable)
-		hisi_drm_crtc_ade_enable(crtc_ade);
-	else
-		hisi_drm_crtc_ade_disable(crtc_ade);
-	crtc_ade->enable = enable;
-
-	DRM_DEBUG_DRIVER("crtc_dpms exit successfully.\n");
-}
-
-static bool hisi_drm_crtc_mode_fixup(struct drm_crtc *crtc,
-				      const struct drm_display_mode *mode,
-				      struct drm_display_mode *adj_mode)
-{
-	struct hisi_drm_ade_crtc *crtc_ade = to_hisi_crtc(crtc);
-	u32 clock_kHz = mode->clock;
+	void __iomem *media_base = ctx->media_base;
 	int ret;
 
-	DRM_DEBUG_DRIVER("mode_fixup  enter successfully.\n");
-
-	if (!crtc_ade->power_on)
-		if (ade_power_up(crtc_ade))
-			DRM_ERROR("%s: failed to power up ade\n", __func__);
-
-	do {
-		ret = clk_set_rate(crtc_ade->ade_pix_clk, clock_kHz * 1000);
-		if (ret) {
-			DRM_ERROR("set ade_pixel_clk_rate fail\n");
-			return false;
-		}
-		adj_mode->clock = clk_get_rate(crtc_ade->ade_pix_clk) / 1000;
-#if FORCE_PIXEL_CLOCK_SAME_OR_HIGHER
-		if (adj_mode->clock >= clock_kHz)
-#endif
-		/* This avoids a bad 720p DSI clock with 1.2GHz DPI PLL */
-		if (adj_mode->clock != 72000)
-			break;
-
-		clock_kHz += 10;
-	} while (1);
-
-	pr_info("%s: pixel clock: req %dkHz -> actual: %dkHz\n",
-		__func__, mode->clock, adj_mode->clock);
-
-	DRM_DEBUG_DRIVER("mode_fixup  exit successfully.\n");
-	return true;
-}
-
-static void hisi_drm_crtc_mode_prepare(struct drm_crtc *crtc)
-{
-	DRM_DEBUG_DRIVER(" enter successfully.\n");
-	DRM_DEBUG_DRIVER(" exit successfully.\n");
-}
-
-static int hisi_drm_crtc_mode_set(struct drm_crtc *crtc,
-				   struct drm_display_mode *mode,
-				   struct drm_display_mode *adjusted_mode,
-				   int x, int y,
-				   struct drm_framebuffer *old_fb)
-{
-	struct hisi_drm_ade_crtc *crtc_ade = to_hisi_crtc(crtc);
-
-	DRM_DEBUG_DRIVER("mode_set  enter successfully.\n");
-	crtc_ade->dmode = mode;
-	DRM_DEBUG_DRIVER("mode_set  exit successfully.\n");
-	return 0;
-}
-
-static void hisi_drm_crtc_mode_commit(struct drm_crtc *crtc)
-{
-
-	DRM_DEBUG_DRIVER("mode_commit enter successfully.\n");
-	DRM_DEBUG_DRIVER("mode_commit exit successfully.\n");
-}
-
-static int hisi_drm_crtc_mode_set_base(struct drm_crtc *crtc, int x, int y,
-					struct drm_framebuffer *old_fb)
-{
-	struct hisi_drm_ade_crtc *crtc_ade = to_hisi_crtc(crtc);
-
-	DRM_DEBUG_DRIVER("enter.\n");
-	hisi_update_scanout(crtc_ade, x, y);
-	DRM_DEBUG_DRIVER("exit successfully.\n");
-	return 0;
-}
-
-static const struct drm_crtc_helper_funcs crtc_helper_funcs = {
-	.dpms = hisi_drm_crtc_dpms,
-	.mode_fixup = hisi_drm_crtc_mode_fixup,
-	.prepare = hisi_drm_crtc_mode_prepare,
-	.commit = hisi_drm_crtc_mode_commit,
-	.mode_set = hisi_drm_crtc_mode_set,
-	.mode_set_base = hisi_drm_crtc_mode_set_base,
-};
-
-static int hisi_drm_crtc_page_flip(struct drm_crtc *crtc,
-				    struct drm_framebuffer *fb,
-				    struct drm_pending_vblank_event *event,
-				    uint32_t page_flip_flags)
-{
-	struct hisi_drm_ade_crtc *crtc_ade = to_hisi_crtc(crtc);
-
-	DRM_DEBUG_DRIVER("enter.\n");
-	crtc->primary->fb = fb;
-	hisi_update_scanout(crtc_ade, 0, 0);
-	DRM_DEBUG_DRIVER("exit successfully.\n");
-
-	return 0;
-}
-
-static const struct drm_crtc_funcs crtc_funcs = {
-	.destroy = drm_crtc_cleanup,
-	.set_config = drm_crtc_helper_set_config,
-	.page_flip = hisi_drm_crtc_page_flip,
-};
-
-static int hisi_drm_crtc_create(struct hisi_drm_ade_crtc *crtc_ade)
-{
-	struct drm_crtc *crtc = &crtc_ade->crtc;
-	struct hisi_drm_private *private = crtc_ade->drm_dev->dev_private;
-	int ret;
-
-	crtc_ade->enable = false;
-	crtc_ade->power_on = false;
-	ret = drm_crtc_init(crtc_ade->drm_dev, crtc, &crtc_funcs);
-	if (ret < 0)
+	ret = clk_set_rate(ctx->ade_core_clk, ctx->ade_core_rate);
+	if (ret) {
+		DRM_ERROR("clk_set_rate ade_core_rate error\n");
 		return ret;
+	}
+	ret = clk_set_rate(ctx->media_noc_clk, ctx->media_noc_rate);
+	if (ret) {
+		DRM_ERROR("media_noc_clk media_noc_rate error\n");
+		return ret;
+	}
+	ret = clk_prepare_enable(ctx->media_noc_clk);
+	if (ret) {
+		DRM_ERROR("fail to clk_prepare_enable media_noc_clk\n");
+		return ret;
+	}
 
-	drm_crtc_helper_add(crtc, &crtc_helper_funcs);
-	private->crtc = crtc;
+	writel(0x20, media_base + SC_MEDIA_RSTDIS);
 
+	ret = clk_prepare_enable(ctx->ade_core_clk);
+	if (ret) {
+		DRM_ERROR("fail to clk_prepare_enable ade_core_clk\n");
+		return ret;
+	}
+	ctx->power_on = true;
 	return 0;
 }
 
-static int hisi_drm_ade_dts_parse(struct platform_device *pdev,
-				    struct hisi_drm_ade_crtc *crtc_ade)
+static void ade_power_down(struct hisi_display_context *ctx)
 {
-	struct resource	    *res;
-	struct device	    *dev;
-	struct device_node  *np;
-	int ret;
+	void __iomem *ade_base = ctx->ade_base;
+	void __iomem *media_base = ctx->media_base;
 
-	dev = &pdev->dev;
-	np  = dev->of_node;
+	set_LDI_CTRL_ldi_en(ade_base, ADE_DISABLE);
+	/* dsi pixel off */
+	set_reg(ade_base + LDI_HDMI_DSI_GT_REG, 0x1, 1, 0);
 
-	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "ade_base");
-	crtc_ade->ade_base = devm_ioremap_resource(&pdev->dev, res);
-	if (IS_ERR(crtc_ade->ade_base)) {
-		DRM_ERROR("failed to remap io region0\n");
-		ret = PTR_ERR(crtc_ade->ade_base);
-	}
-
-	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "media_base");
-	crtc_ade->media_base = devm_ioremap_resource(&pdev->dev, res);
-	if (IS_ERR(crtc_ade->media_base)) {
-		DRM_ERROR("failed to remap io region1\n");
-		ret = PTR_ERR(crtc_ade->media_base);
-	}
-
-	crtc_ade->ade_core_clk = devm_clk_get(&pdev->dev, "clk_ade_core");
-	if (crtc_ade->ade_core_clk == NULL) {
-		DRM_ERROR("failed to parse the ADE_CORE\n");
-	    return -ENODEV;
-	}
-	crtc_ade->media_noc_clk = devm_clk_get(&pdev->dev,
-					"aclk_codec_jpeg_src");
-	if (crtc_ade->media_noc_clk == NULL) {
-		DRM_ERROR("failed to parse the CODEC_JPEG\n");
-	    return -ENODEV;
-	}
-	crtc_ade->ade_pix_clk = devm_clk_get(&pdev->dev, "clk_ade_pix");
-	if (crtc_ade->ade_pix_clk == NULL) {
-		DRM_ERROR("failed to parse the ADE_PIX_SRC\n");
-	    return -ENODEV;
-	}
-
-	ret = of_property_read_u32(np, "ade_core_clk_rate",
-				    &crtc_ade->ade_core_rate);
-	if (ret) {
-		DRM_ERROR("failed to parse the ade_core_clk_rate\n");
-	    return -ENODEV;
-	}
-	ret = of_property_read_u32(np, "media_noc_clk_rate",
-				    &crtc_ade->media_noc_rate);
-	if (ret) {
-		DRM_ERROR("failed to parse the media_noc_clk_rate\n");
-	    return -ENODEV;
-	}
-
-	return ret;
+	clk_disable_unprepare(ctx->ade_core_clk);
+	writel(0x20, media_base + SC_MEDIA_RSTEN);
+	clk_disable_unprepare(ctx->media_noc_clk);
+	ctx->power_on = false;
 }
 
-int hisi_drm_enable_vblank(struct drm_device *dev, int crtc)
+static void hisi_update_disp_channel(struct hisi_display_context *ctx,
+				struct drm_framebuffer *fb, int x, int y)
 {
-	struct hisi_drm_private *private = dev->dev_private;
-	struct hisi_drm_ade_crtc *crtc_ade = to_hisi_crtc(private->crtc);
-	void __iomem *ade_base = crtc_ade->ade_base;
-	u32 intr_en;
-
-	DRM_INFO("enable_vblank enter.\n");
-	if (!crtc_ade->power_on)
-		(void) ade_power_up(crtc_ade);
-
-	intr_en = readl(ade_base + LDI_INT_EN_REG);
-	intr_en |= LDI_ISR_FRAME_END_INT;
-	writel(intr_en, ade_base + LDI_INT_EN_REG);
-	return 0;
-}
-
-void hisi_drm_disable_vblank(struct drm_device *dev, int crtc)
-{
-	struct hisi_drm_private *private = dev->dev_private;
-	struct hisi_drm_ade_crtc *crtc_ade = to_hisi_crtc(private->crtc);
-	void __iomem *ade_base = crtc_ade->ade_base;
-	u32 intr_en;
-
-	DRM_INFO("disable_vblank enter.\n");
-	if (!crtc_ade->power_on) {
-		DRM_ERROR("crtc not enable! vblank disable fail\n");
-		return ;
-	}
-	intr_en = readl(ade_base + LDI_INT_EN_REG);
-	intr_en &= ~LDI_ISR_FRAME_END_INT;
-	writel(intr_en, ade_base + LDI_INT_EN_REG);
-}
-
-irqreturn_t hisi_drm_irq_handler(int irq, void *arg)
-{
-	struct drm_device *dev = (struct drm_device *) arg;
-	struct hisi_drm_private *private = dev->dev_private;
-	struct hisi_drm_ade_crtc *crtc_ade = to_hisi_crtc(private->crtc);
-	void __iomem *ade_base = crtc_ade->ade_base;
-	u32 status;
-
-	status = readl(ade_base + LDI_MSK_INT_REG);
-	/* DRM_INFO("LDI IRQ: status=0x%X\n",status); */
-
-	/* vblank irq */
-	if (status & LDI_ISR_FRAME_END_INT) {
-		writel(LDI_ISR_FRAME_END_INT, ade_base + LDI_INT_CLR_REG);
-		drm_handle_vblank(dev, drm_crtc_index(&crtc_ade->crtc));
-	}
-
-	return IRQ_HANDLED;
-}
-
-static void hisi_update_scanout(struct hisi_drm_ade_crtc *crtc_ade, int x, int y)
-{
-	struct drm_framebuffer *fb = crtc_ade->crtc.primary->fb;
 	struct drm_gem_cma_object *obj = hisi_drm_fb_get_gem_obj(fb, 0);
 	struct hisi_drm_fb *hisi_fb = to_hisi_drm_fb(fb);
-	void __iomem *ade_base = crtc_ade->ade_base;
+	void __iomem *ade_base = ctx->ade_base;
 	u32 stride;
 	u32 display_addr;
 	u32 offset;
@@ -626,49 +379,483 @@ static void hisi_update_scanout(struct hisi_drm_ade_crtc *crtc_ade, int x, int y
 	writel(fb->width * fb_hight - 1,
 		ade_base + ADE_CTRAN6_IMAGE_SIZE_REG);
 
-	wmb();
+	DRM_INFO("ADE GO.\n");
 	/* enable ade */
+	wmb();
 	writel(ADE_ENABLE, ade_base + ADE_EN_REG);
 }
 
+static void  hisi_ade_crtc_enable(struct drm_crtc *crtc)
+{
+	struct hisi_ade_crtc *ade_crtc = to_ade_crtc(crtc);
+	struct hisi_display_context *ctx = ade_crtc->ctx;
+	int ret;
+
+	DRM_DEBUG_DRIVER("enter.\n");
+	if (ade_crtc->enable)
+		return;
+
+	if (!ctx->power_on) {
+		ret = ade_power_up(ctx);
+		if (ret) {
+			DRM_ERROR("failed to initialize ade clk\n");
+			return ;
+		}
+	}
+
+	ade_init(ctx);
+	ldi_init(ctx, ade_crtc->dmode);
+	drm_crtc_vblank_on(crtc);
+
+	ade_crtc->enable = true;
+	DRM_DEBUG_DRIVER("exit success.\n");
+}
+
+static void hisi_ade_crtc_disable(struct drm_crtc *crtc)
+{
+	struct hisi_ade_crtc *ade_crtc = to_ade_crtc(crtc);
+	struct hisi_display_context *ctx = ade_crtc->ctx;
+
+	DRM_DEBUG_DRIVER("enter.\n");
+	if (!ade_crtc->enable)
+		return;
+
+	drm_crtc_vblank_off(crtc);
+	ade_power_down(ctx);
+
+	ade_crtc->enable = false;
+	DRM_DEBUG_DRIVER("exit success.\n");
+}
+
+static bool hisi_drm_crtc_mode_fixup(struct drm_crtc *crtc,
+				      const struct drm_display_mode *mode,
+				      struct drm_display_mode *adj_mode)
+{
+	struct hisi_ade_crtc *ade_crtc = to_ade_crtc(crtc);
+	struct hisi_display_context *ctx = ade_crtc->ctx;
+	u32 clock_kHz = mode->clock;
+	int ret;
+
+	DRM_DEBUG_DRIVER("enter.\n");
+
+	if (!ctx->power_on)
+		if (ade_power_up(ctx))
+			DRM_ERROR("%s: failed to power up ade\n", __func__);
+
+	do {
+		ret = clk_set_rate(ctx->ade_pix_clk, clock_kHz * 1000);
+		if (ret) {
+			DRM_ERROR("set ade_pixel_clk_rate fail\n");
+			return false;
+		}
+		adj_mode->clock = clk_get_rate(ctx->ade_pix_clk) / 1000;
+#if FORCE_PIXEL_CLOCK_SAME_OR_HIGHER
+		if (adj_mode->clock >= clock_kHz)
+#endif
+		/* This avoids a bad 720p DSI clock with 1.2GHz DPI PLL */
+		if (adj_mode->clock != 72000)
+			break;
+
+		clock_kHz += 10;
+	} while (1);
+
+	pr_info("%s: pixel clock: req %dkHz -> actual: %dkHz\n",
+		__func__, mode->clock, adj_mode->clock);
+
+	DRM_DEBUG_DRIVER("mode_fixup  exit successfully.\n");
+	return true;
+}
+
+static void hisi_drm_crtc_mode_set_nofb(struct drm_crtc *crtc)
+{
+	struct hisi_ade_crtc *ade_crtc = to_ade_crtc(crtc);
+
+	DRM_DEBUG_DRIVER("enter.\n");
+	ade_crtc->dmode = &crtc->state->mode;
+	DRM_DEBUG_DRIVER("exit success.\n");
+}
+
+static void hisi_crtc_atomic_begin(struct drm_crtc *crtc)
+{
+	DRM_DEBUG_DRIVER("enter.\n");
+	DRM_DEBUG_DRIVER("exit success.\n");
+}
+
+static void hisi_crtc_atomic_flush(struct drm_crtc *crtc)
+{
+/*	struct hisi_ade_crtc *ade_crtc = to_ade_crtc(crtc);
+	struct hisi_display_context *ctx = ade_crtc->ctx;
+	void __iomem *ade_base = ctx->ade_base; */
+
+	DRM_DEBUG_DRIVER("enter.\n");
+	DRM_DEBUG_DRIVER("exit success.\n");
+}
+
+static void hisi_drm_crtc_mode_prepare(struct drm_crtc *crtc)
+{
+	struct hisi_ade_crtc *ade_crtc = to_ade_crtc(crtc);
+	struct hisi_display_context *ctx = ade_crtc->ctx;
+
+	DRM_DEBUG_DRIVER("enter.\n");
+	if (!ctx->power_on)
+		(void) ade_power_up(ctx);
+	DRM_DEBUG_DRIVER("exit success.\n");
+}
+
+static const struct drm_crtc_helper_funcs crtc_helper_funcs = {
+	.enable		= hisi_ade_crtc_enable,
+	.disable	= hisi_ade_crtc_disable,
+	.prepare	= hisi_drm_crtc_mode_prepare,
+	.mode_fixup	= hisi_drm_crtc_mode_fixup,
+	.mode_set_nofb	= hisi_drm_crtc_mode_set_nofb,
+	.atomic_begin	= hisi_crtc_atomic_begin,
+	.atomic_flush	= hisi_crtc_atomic_flush,
+};
+
+static void hisi_drm_crtc_destroy(struct drm_crtc *crtc)
+{
+	struct hisi_ade_crtc *ade_crtc = to_ade_crtc(crtc);
+
+	drm_crtc_cleanup(crtc);
+	devm_kfree(crtc->dev->dev, ade_crtc);
+}
+
+static const struct drm_crtc_funcs crtc_funcs = {
+	.destroy	= hisi_drm_crtc_destroy,
+	.set_config	= drm_atomic_helper_set_config,
+	.page_flip	= drm_atomic_helper_page_flip,
+	.reset		= drm_atomic_helper_crtc_reset,
+	.atomic_duplicate_state	= drm_atomic_helper_crtc_duplicate_state,
+	.atomic_destroy_state	= drm_atomic_helper_crtc_destroy_state,
+};
+
+static struct hisi_ade_crtc *hisi_drm_crtc_create(struct drm_device  *dev,
+						  struct hisi_display_context *ctx,
+						  struct drm_plane *plane)
+{
+	struct hisi_ade_crtc *crtc;
+	struct hisi_drm_private *private = dev->dev_private;
+	int ret;
+
+	crtc = devm_kzalloc(dev->dev, sizeof(*crtc), GFP_KERNEL);
+	if (!crtc)
+		return ERR_PTR(-ENOMEM);
+
+	ret = drm_crtc_init_with_planes(dev, &crtc->base, plane, 
+					NULL, &crtc_funcs);
+	if (ret)
+		return ERR_PTR(ret);
+
+	drm_crtc_helper_add(&crtc->base, &crtc_helper_funcs);
+
+	private->crtc = &crtc->base;
+	crtc->ctx = ctx;
+	return crtc;
+}
+
+static int hisi_drm_ade_dts_parse(struct platform_device *pdev,
+				    struct hisi_display_context *ctx)
+{
+	struct resource	    *res;
+	struct device	    *dev;
+	struct device_node  *np;
+	int ret;
+
+	dev = &pdev->dev;
+	np  = dev->of_node;
+
+	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "ade_base");
+	ctx->ade_base = devm_ioremap_resource(&pdev->dev, res);
+	if (IS_ERR(ctx->ade_base)) {
+		DRM_ERROR("failed to remap io region0\n");
+		ret = PTR_ERR(ctx->ade_base);
+	}
+
+	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "media_base");
+	ctx->media_base = devm_ioremap_resource(&pdev->dev, res);
+	if (IS_ERR(ctx->media_base)) {
+		DRM_ERROR("failed to remap io region1\n");
+		ret = PTR_ERR(ctx->media_base);
+	}
+
+	ctx->ade_core_clk = devm_clk_get(&pdev->dev, "clk_ade_core");
+	if (ctx->ade_core_clk == NULL) {
+		DRM_ERROR("failed to parse the ADE_CORE\n");
+	    return -ENODEV;
+	}
+	ctx->media_noc_clk = devm_clk_get(&pdev->dev,
+					"aclk_codec_jpeg_src");
+	if (ctx->media_noc_clk == NULL) {
+		DRM_ERROR("failed to parse the CODEC_JPEG\n");
+	    return -ENODEV;
+	}
+	ctx->ade_pix_clk = devm_clk_get(&pdev->dev, "clk_ade_pix");
+	if (ctx->ade_pix_clk == NULL) {
+		DRM_ERROR("failed to parse the ADE_PIX_SRC\n");
+	    return -ENODEV;
+	}
+
+	ret = of_property_read_u32(np, "ade_core_clk_rate",
+				    &ctx->ade_core_rate);
+	if (ret) {
+		DRM_ERROR("failed to parse the ade_core_clk_rate\n");
+	    return -ENODEV;
+	}
+	ret = of_property_read_u32(np, "media_noc_clk_rate",
+				    &ctx->media_noc_rate);
+	if (ret) {
+
+		DRM_ERROR("failed to parse the media_noc_clk_rate\n");
+	    return -ENODEV;
+	}
+
+	return ret;
+}
+
+int hisi_drm_enable_vblank(struct drm_device *dev, int crtc)
+{
+	struct hisi_drm_private *private = dev->dev_private;
+	struct hisi_ade_crtc *ade_crtc = to_ade_crtc(private->crtc);
+	struct hisi_display_context *ctx = ade_crtc->ctx;
+	void __iomem *ade_base = ctx->ade_base;
+	u32 intr_en;
+
+	DRM_INFO("enable_vblank enter.\n");
+	if (!ctx->power_on)
+		(void) ade_power_up(ctx);
+
+	intr_en = readl(ade_base + LDI_INT_EN_REG);
+	intr_en |= LDI_ISR_FRAME_END_INT;
+	writel(intr_en, ade_base + LDI_INT_EN_REG);
+	return 0;
+}
+
+void hisi_drm_disable_vblank(struct drm_device *dev, int crtc)
+{
+	struct hisi_drm_private *private = dev->dev_private;
+	struct hisi_ade_crtc *ade_crtc = to_ade_crtc(private->crtc);
+	struct hisi_display_context *ctx = ade_crtc->ctx;
+	void __iomem *ade_base = ctx->ade_base;
+	u32 intr_en;
+
+	DRM_INFO("disable_vblank enter.\n");
+	if (!ctx->power_on) {
+		DRM_ERROR("power is down! vblank disable fail\n");
+		return ;
+	}
+	intr_en = readl(ade_base + LDI_INT_EN_REG);
+	intr_en &= ~LDI_ISR_FRAME_END_INT;
+	writel(intr_en, ade_base + LDI_INT_EN_REG);
+}
+
+irqreturn_t hisi_drm_irq_handler(int irq, void *arg)
+{
+	struct drm_device *dev = (struct drm_device *) arg;
+	struct hisi_drm_private *private = dev->dev_private;
+	struct hisi_ade_crtc *ade_crtc = to_ade_crtc(private->crtc);
+	struct hisi_display_context *ctx = ade_crtc->ctx;
+	void __iomem *ade_base = ctx->ade_base;
+	u32 status;
+
+	status = readl(ade_base + LDI_MSK_INT_REG);
+	/* DRM_INFO("LDI IRQ: status=0x%X\n",status); */
+
+	/* vblank irq */
+	if (status & LDI_ISR_FRAME_END_INT) {
+		writel(LDI_ISR_FRAME_END_INT, ade_base + LDI_INT_CLR_REG);
+		drm_handle_vblank(dev, drm_crtc_index(&ade_crtc->base));
+	}
+
+	return IRQ_HANDLED;
+}
+
+
+
+void hisi_update_channel(struct drm_plane *plane, struct drm_crtc *crtc,
+			  struct drm_framebuffer *fb, int crtc_x, int crtc_y,
+			  unsigned int crtc_w, unsigned int crtc_h,
+			  uint32_t src_x, uint32_t src_y,
+			  uint32_t src_w, uint32_t src_h)
+{
+	struct hisi_ade_plane *ade_plane = to_ade_plane(plane);
+	struct hisi_display_context *ctx = ade_plane->ctx;
+
+	DRM_DEBUG_DRIVER("enter, channel=%d\n", ade_plane->ch);
+	switch (ade_plane->ch) {
+	case ADE_DISP:
+		hisi_update_disp_channel(ctx, fb, 0, 0);
+		break;
+	default:
+		break;
+	}
+
+	DRM_DEBUG_DRIVER("exit success.\n");
+}
+
+static void hisi_plane_destroy(struct drm_plane *plane)
+{
+	struct hisi_ade_plane *ade_plane = to_ade_plane(plane);
+
+	drm_plane_cleanup(plane);
+	devm_kfree(plane->dev->dev, ade_plane);
+}
+
+static struct drm_plane_funcs hisi_plane_funcs = {
+	.update_plane	= drm_atomic_helper_update_plane,
+	.disable_plane	= drm_atomic_helper_disable_plane,
+	.set_property = drm_atomic_helper_plane_set_property,
+	.destroy	= hisi_plane_destroy,
+	.reset = drm_atomic_helper_plane_reset,
+	.atomic_duplicate_state = drm_atomic_helper_plane_duplicate_state,
+	.atomic_destroy_state = drm_atomic_helper_plane_destroy_state,
+};
+
+int hisi_plane_prepare_fb(struct drm_plane *plane,
+				struct drm_framebuffer *fb,
+				const struct drm_plane_state *new_state)
+{
+	DRM_DEBUG_DRIVER("enter.\n");
+	DRM_DEBUG_DRIVER("exit success.\n");
+	return 0;
+}
+
+void hisi_plane_cleanup_fb(struct drm_plane *plane,
+				struct drm_framebuffer *fb,
+				const struct drm_plane_state *old_state)
+{
+	DRM_DEBUG_DRIVER("enter.\n");
+	DRM_DEBUG_DRIVER("exit success.\n");
+}
+
+static int hisi_plane_atomic_check(struct drm_plane *plane,
+				     struct drm_plane_state *state)
+{
+	DRM_DEBUG_DRIVER("enter.\n");
+	DRM_DEBUG_DRIVER("exit success.\n");
+	return 0;
+}
+
+static void hisi_plane_atomic_update(struct drm_plane *plane,
+				       struct drm_plane_state *old_state)
+{
+	struct drm_plane_state	*state	= plane->state;
+
+	DRM_DEBUG_DRIVER("enter.\n");
+	if (!state->crtc)
+		return;
+
+	hisi_update_channel(plane, state->crtc, state->fb,
+		      state->crtc_x, state->crtc_y,
+		      state->crtc_w, state->crtc_h,
+		      state->src_x >> 16, state->src_y >> 16,
+		      state->src_w >> 16, state->src_h >> 16);
+
+	DRM_DEBUG_DRIVER("exit success.\n");
+}
+
+void hisi_plane_atomic_disable(struct drm_plane *plane,
+			       struct drm_plane_state *old_state)
+{
+	DRM_DEBUG_DRIVER("enter.\n");
+	DRM_DEBUG_DRIVER("exit success.\n");
+}
+
+static const struct drm_plane_helper_funcs hisi_plane_helper_funcs = {
+	.prepare_fb = hisi_plane_prepare_fb,
+	.cleanup_fb = hisi_plane_cleanup_fb,
+	.atomic_check = hisi_plane_atomic_check,
+	.atomic_update = hisi_plane_atomic_update,
+	.atomic_disable = hisi_plane_atomic_disable,
+};
+
+struct hisi_ade_plane *hisi_drm_plane_init(struct drm_device *dev,
+					   struct hisi_display_context *ctx,
+					   enum ade_channel ch)
+{
+	struct hisi_ade_plane *plane;
+	enum drm_plane_type type;
+	int ret;
+
+	plane = devm_kzalloc(dev->dev, sizeof(*plane), GFP_KERNEL);
+	if (!plane)
+		return ERR_PTR(-ENOMEM);
+	plane->ctx = ctx;
+	plane->ch = ch;
+
+	type = ch == ADE_DISP ? DRM_PLANE_TYPE_PRIMARY :
+		DRM_PLANE_TYPE_OVERLAY;
+
+	ret = drm_universal_plane_init(dev, &plane->base, 1,
+					&hisi_plane_funcs,
+					plane_formats,
+					ARRAY_SIZE(plane_formats),
+					type);
+	if (ret) {
+		DRM_ERROR("fail to init plane\n");
+		return ERR_PTR(ret);
+	}
+
+	drm_plane_helper_add(&plane->base, &hisi_plane_helper_funcs);
+
+	/* TODO: set property */
+
+	return plane;
+}
 static int hisi_ade_probe(struct platform_device *pdev)
 {
-	struct hisi_drm_ade_crtc *crtc_ade;
+	struct hisi_display_context *ctx;
+	struct hisi_ade_plane *plane;
+	struct hisi_ade_crtc *crtc;
+	struct drm_device  *drm_dev;
 	int ret;
+	int i;
 
 	/* debug setting */
 	DRM_DEBUG_DRIVER("drm_ade enter.\n");
-
-	crtc_ade = devm_kzalloc(&pdev->dev, sizeof(*crtc_ade), GFP_KERNEL);
-	if (crtc_ade == NULL) {
-		DRM_ERROR("failed to alloc the space\n");
-		return -ENOMEM;
-	}
-
-	crtc_ade->drm_dev = dev_get_platdata(&pdev->dev);
-	if (crtc_ade->drm_dev == NULL) {
+	drm_dev = dev_get_platdata(&pdev->dev);
+	if (!drm_dev) {
 		DRM_ERROR("no platform data\n");
 		return -EINVAL;
 	}
 
-	ret = hisi_drm_ade_dts_parse(pdev, crtc_ade);
+
+	ctx = devm_kzalloc(drm_dev->dev, sizeof(*ctx), GFP_KERNEL);
+	if (!ctx) {
+		DRM_ERROR("failed to alloc the space\n");
+		return -ENOMEM;
+	}
+
+	ret = hisi_drm_ade_dts_parse(pdev, ctx);
 	if (ret) {
 		DRM_ERROR("failed to dts parse\n");
 		return ret;
 	}
 
-	ret = hisi_drm_crtc_create(crtc_ade);
-	if (ret) {
+	/* plane init */
+	for (i=0; i<ADE_CH_NUM; i++) {
+		plane = hisi_drm_plane_init(drm_dev, ctx, i);
+		if (IS_ERR(plane))
+			return PTR_ERR(plane);
+
+		ctx->plane[i] = plane;
+	}
+
+	crtc = hisi_drm_crtc_create(drm_dev, ctx,
+				    &ctx->plane[ADE_DISP]->base);
+	if (IS_ERR(crtc)) {
 		DRM_ERROR("failed to crtc creat\n");
-		return ret;
+		return PTR_ERR(crtc);
 	}
 
 	/* ldi irq install */
-	ret = drm_irq_install(crtc_ade->drm_dev, platform_get_irq(pdev, 0));
+	ret = drm_irq_install(drm_dev, platform_get_irq(pdev, 0));
 	if (ret) {
 		DRM_ERROR("failed to install IRQ handler\n");
 		return ret;
 	}
+
+	ctx->drm_dev = drm_dev;
+	ctx->ade_crtc = crtc;
 
 	DRM_DEBUG_DRIVER("drm_ade exit successfully.\n");
 

@@ -22,6 +22,7 @@
 #include <drm/drm_mipi_dsi.h>
 #include <drm/drm_fb_helper.h>
 #include <drm/drm_encoder_slave.h>
+#include <drm/drm_atomic_helper.h>
 
 #ifdef CONFIG_DRM_HISI_FBDEV
 #include "hisi_drm_fbdev.h"
@@ -828,15 +829,10 @@ static void hisi_drm_encoder_mode_set(struct drm_encoder *encoder,
 			(u32)vm->pixelclock, dphy_freq_kHz);
 }
 
-static void hisi_drm_encoder_prepare(struct drm_encoder *encoder)
+static void hisi_drm_encoder_enable(struct drm_encoder *encoder)
 {
 	DRM_DEBUG_DRIVER("enter.\n");
-	DRM_DEBUG_DRIVER("exit success.\n");
-}
-
-static void hisi_drm_encoder_commit(struct drm_encoder *encoder)
-{
-	DRM_DEBUG_DRIVER("enter.\n");
+	hisi_drm_encoder_dpms(encoder, DRM_MODE_DPMS_ON);
 	DRM_DEBUG_DRIVER("exit success.\n");
 }
 
@@ -848,11 +844,9 @@ static void hisi_drm_encoder_disable(struct drm_encoder *encoder)
 }
 
 static struct drm_encoder_helper_funcs hisi_encoder_helper_funcs = {
-	.dpms		= hisi_drm_encoder_dpms,
 	.mode_fixup	= hisi_drm_encoder_mode_fixup,
 	.mode_set	= hisi_drm_encoder_mode_set,
-	.prepare	= hisi_drm_encoder_prepare,
-	.commit		= hisi_drm_encoder_commit,
+	.enable		= hisi_drm_encoder_enable,
 	.disable	= hisi_drm_encoder_disable
 };
 
@@ -879,10 +873,13 @@ static void hisi_dsi_connector_destroy(struct drm_connector *connector)
 }
 
 static struct drm_connector_funcs hisi_dsi_connector_funcs = {
-	.dpms = drm_helper_connector_dpms,
+	.dpms = drm_atomic_helper_connector_dpms,
 	.fill_modes = drm_helper_probe_single_connector_modes,
 	.detect = hisi_dsi_detect,
 	.destroy = hisi_dsi_connector_destroy,
+	.reset = drm_atomic_helper_connector_reset,
+	.atomic_duplicate_state = drm_atomic_helper_connector_duplicate_state,
+	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
 };
 
 static int hisi_dsi_get_modes(struct drm_connector *connector)
@@ -980,6 +977,7 @@ void hisi_drm_connector_create(struct drm_device *dev, struct hisi_dsi *dsi)
 #ifndef CONFIG_DRM_HISI_FBDEV
 	drm_reinit_primary_mode_group(dev);
 #endif
+	drm_mode_config_reset(dev);
 	DRM_DEBUG_DRIVER("exit success.\n");
 }
 
