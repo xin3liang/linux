@@ -19,7 +19,7 @@ struct hisi_drm_fbdev {
 };
 
 
-extern int hisi_drm_fbdev_init(struct drm_device *drm_dev);
-extern void hisi_drm_fbdev_exit(struct drm_device *drm_dev);
+extern int hisi_drm_fbdev_init(struct drm_device *dev);
+extern void hisi_drm_fbdev_exit(struct drm_device *dev);
 
 #endif /* __HISI_DRM_FBDEV_H__ */

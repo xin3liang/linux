@@ -26,12 +26,12 @@
 #include "hisi_drm_drv.h"
 
 
-static int hisi_drm_sub_drivers_init(struct drm_device *drm_dev)
+static int hisi_drm_sub_drivers_init(struct drm_device *dev)
 {
 	int ret;
 	struct device_node *child_np;
 	struct platform_device *pdev;
-	struct device *parent_dev = &drm_dev->platformdev->dev;
+	struct device *parent_dev = &dev->platformdev->dev;
 	struct device_node *parent_np = parent_dev->of_node;
 
 	/*
@@ -51,12 +51,12 @@ static int hisi_drm_sub_drivers_init(struct drm_device *drm_dev)
 		}
 		/* let drm_dev as platform data,
 		so that sub drivers can access it */
-		pdev->dev.platform_data = drm_dev;
+		pdev->dev.platform_data = dev;
 	}
 #if 0
 	/* fbdev initialization should be put at last position */
 #ifdef CONFIG_DRM_HISI_FBDEV
-	ret = hisi_drm_fbdev_init(drm_dev);
+	ret = hisi_drm_fbdev_init(dev);
 	if (ret) {
 		DRM_ERROR("failed to initialize fbdev\n");
 		goto err_fbdev_init;
@@ -73,25 +73,25 @@ static int hisi_drm_sub_drivers_init(struct drm_device *drm_dev)
 	return ret;
 }
 
-static void hisi_drm_sub_drivers_exit(struct drm_device *drm_dev)
+static void hisi_drm_sub_drivers_exit(struct drm_device *dev)
 {
-	struct device *dev = &drm_dev->platformdev->dev;
+	struct device *device = &dev->platformdev->dev;
 
-	of_platform_depopulate(dev);
+	of_platform_depopulate(device);
 #ifdef CONFIG_DRM_HISI_FBDEV
-	hisi_drm_fbdev_exit(drm_dev);
+	hisi_drm_fbdev_exit(dev);
 #endif
 }
 
-static int hisi_drm_unload(struct drm_device *drm_dev)
+static int hisi_drm_unload(struct drm_device *dev)
 {
-	struct hisi_drm_private *private = drm_dev->dev_private;
+	struct hisi_drm_private *private = dev->dev_private;
 
-	drm_vblank_cleanup(drm_dev);
-	drm_mode_config_cleanup(drm_dev);
-	hisi_drm_sub_drivers_exit(drm_dev);
+	drm_vblank_cleanup(dev);
+	drm_mode_config_cleanup(dev);
+	hisi_drm_sub_drivers_exit(dev);
 	kfree(private);
-	drm_dev->dev_private = NULL;
+	dev->dev_private = NULL;
 	return 0;
 }
 
@@ -112,7 +112,7 @@ static void hisi_drm_mode_config_init(struct drm_device *dev)
 	dev->mode_config.funcs = &hisi_drm_mode_config_funcs;
 }
 
-static int hisi_drm_load(struct drm_device *drm_dev, unsigned long flags)
+static int hisi_drm_load(struct drm_device *dev, unsigned long flags)
 {
 	int ret;
 	struct hisi_drm_private *private;
@@ -125,15 +125,15 @@ static int hisi_drm_load(struct drm_device *drm_dev, unsigned long flags)
 	if (!private)
 		return -ENOMEM;
 
-	drm_dev->dev_private = private;
-	dev_set_drvdata(drm_dev->dev, drm_dev);
+	dev->dev_private = private;
+	dev_set_drvdata(dev->dev, dev);
 
-	/* drm_dev->mode_config initialization */
-	drm_mode_config_init(drm_dev);
-	hisi_drm_mode_config_init(drm_dev);
+	/* dev->mode_config initialization */
+	drm_mode_config_init(dev);
+	hisi_drm_mode_config_init(dev);
 
 	/* sub drivers initialization */
-	ret = hisi_drm_sub_drivers_init(drm_dev);
+	ret = hisi_drm_sub_drivers_init(dev);
 	if (ret) {
 		DRM_ERROR("failed to initialize sub drivers\n");
 		goto err_sub_drivers_init;
@@ -142,7 +142,7 @@ static int hisi_drm_load(struct drm_device *drm_dev, unsigned long flags)
 	//drm_mode_config_reset(dev);
 
 	/* only support one crtc now */
-	ret = drm_vblank_init(drm_dev, 1);
+	ret = drm_vblank_init(dev, 1);
 	if (ret) {
 		DRM_ERROR("failed to initialize vblank\n");
 		goto err_vblank_init;
@@ -152,9 +152,9 @@ static int hisi_drm_load(struct drm_device *drm_dev, unsigned long flags)
 	return 0;
 
 err_vblank_init:
-	hisi_drm_sub_drivers_exit(drm_dev);
+	hisi_drm_sub_drivers_exit(dev);
 err_sub_drivers_init:
-	drm_mode_config_cleanup(drm_dev);
+	drm_mode_config_cleanup(dev);
 
 	return ret;
 }
