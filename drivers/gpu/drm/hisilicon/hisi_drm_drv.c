@@ -2,7 +2,7 @@
  * Hisilicon Terminal SoCs drm driver
  *
  * Copyright (c) 2014-2015 Hisilicon Limited.
- * Author:
+ * Author: Xinwei Kong <kong.kongxinwei@hisilicon.com> for hisilicon
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -10,88 +10,37 @@
  *
  */
 
+#include <drm/drmP.h>
+
+#include <linux/component.h>
+#include <linux/debugfs.h>
+#include <linux/kernel.h>
+#include <linux/module.h>
 #include <linux/of_platform.h>
 
-#include <drm/drmP.h>
 #include <drm/drm_fb_helper.h>
+#include <drm/drm_crtc_helper.h>
 #include <drm/drm_gem_cma_helper.h>
+#include <drm/drm_fb_cma_helper.h>
 #include <drm/drm_atomic_helper.h>
 
-#include "hisi_drm_ade.h"
-#include "hisi_drm_dsi.h"
-#include "hisi_drm_fb.h"
 #ifdef CONFIG_DRM_HISI_FBDEV
 #include "hisi_drm_fbdev.h"
 #endif
 #include "hisi_drm_drv.h"
+#include "hisi_drm_fb.h"
+#include "hisi_ade.h"
 
+#define DRIVER_NAME	"hisi-drm"
 
-static int hisi_drm_sub_drivers_init(struct drm_device *dev)
+static int hisi_drm_unload(struct drm_device *drm_dev)
 {
-	int ret;
-	struct device_node *child_np;
-	struct platform_device *pdev;
-	struct device *parent_dev = &dev->platformdev->dev;
-	struct device_node *parent_np = parent_dev->of_node;
+	struct hisi_drm_private *private = drm_dev->dev_private;
 
-	/*
-	 * First add devices and then initialize drivers
-	 */
-
-	 for_each_available_child_of_node(parent_np, child_np) {
-		/* skip nodes without compatible property */
-		if (!of_find_property(child_np, "compatible", NULL))
-			continue;
-		pdev = of_platform_device_create(child_np, NULL, parent_dev);
-		if (!pdev) {
-			ret = -ENODEV;
-			DRM_ERROR("fail to create plat dev for node:%s\n",
-				 of_node_full_name(child_np));
-			return ret;
-		}
-		/* let drm_dev as platform data,
-		so that sub drivers can access it */
-		pdev->dev.platform_data = dev;
-	}
-#if 0
-	/* fbdev initialization should be put at last position */
-#ifdef CONFIG_DRM_HISI_FBDEV
-	ret = hisi_drm_fbdev_init(dev);
-	if (ret) {
-		DRM_ERROR("failed to initialize fbdev\n");
-		goto err_fbdev_init;
-	}
-#endif
-#endif
-	return 0;
-
-#ifdef CONFIG_DRM_HISI_FBDEV
-/* err_fbdev_init:*/
-	hisi_drm_dsi_exit();
-#endif
-
-	return ret;
-}
-
-static void hisi_drm_sub_drivers_exit(struct drm_device *dev)
-{
-	struct device *device = &dev->platformdev->dev;
-
-	of_platform_depopulate(device);
-#ifdef CONFIG_DRM_HISI_FBDEV
-	hisi_drm_fbdev_exit(dev);
-#endif
-}
-
-static int hisi_drm_unload(struct drm_device *dev)
-{
-	struct hisi_drm_private *private = dev->dev_private;
-
-	drm_vblank_cleanup(dev);
-	drm_mode_config_cleanup(dev);
-	hisi_drm_sub_drivers_exit(dev);
+	drm_vblank_cleanup(drm_dev);
+	drm_mode_config_cleanup(drm_dev);
 	kfree(private);
-	dev->dev_private = NULL;
+	drm_dev->dev_private = NULL;
 	return 0;
 }
 
@@ -101,62 +50,49 @@ static const struct drm_mode_config_funcs hisi_drm_mode_config_funcs = {
 	.atomic_commit = drm_atomic_helper_commit,
 };
 
-static void hisi_drm_mode_config_init(struct drm_device *dev)
+static void hisi_drm_mode_config_init(struct drm_device *drm_dev)
 {
-	dev->mode_config.min_width = 0;
-	dev->mode_config.min_height = 0;
+	drm_dev->mode_config.min_width = 0;
+	drm_dev->mode_config.min_height = 0;
 
-	dev->mode_config.max_width = 2048;
-	dev->mode_config.max_height = 2048;
+	drm_dev->mode_config.max_width = 2048;
+	drm_dev->mode_config.max_height = 2048;
 
-	dev->mode_config.funcs = &hisi_drm_mode_config_funcs;
+	drm_dev->mode_config.funcs = &hisi_drm_mode_config_funcs;
 }
 
-static int hisi_drm_load(struct drm_device *dev, unsigned long flags)
+static int hisi_drm_load(struct drm_device *drm_dev, unsigned long flags)
 {
-	int ret;
 	struct hisi_drm_private *private;
+	int ret;
 
 	/* debug setting */
-	drm_debug = DRM_UT_DRIVER|DRM_UT_KMS|DRM_UT_CORE|DRM_UT_PRIME|DRM_UT_ATOMIC; 
+	drm_debug = DRM_UT_DRIVER|DRM_UT_KMS|DRM_UT_CORE|DRM_UT_PRIME|DRM_UT_ATOMIC;
 	DRM_DEBUG_DRIVER("enter.\n");
 
 	private = kzalloc(sizeof(struct hisi_drm_private), GFP_KERNEL);
 	if (!private)
 		return -ENOMEM;
 
-	dev->dev_private = private;
-	dev_set_drvdata(dev->dev, dev);
+	drm_dev->dev_private = private;
+	dev_set_drvdata(drm_dev->dev, drm_dev);
 
-	/* dev->mode_config initialization */
-	drm_mode_config_init(dev);
-	hisi_drm_mode_config_init(dev);
-
-	/* sub drivers initialization */
-	ret = hisi_drm_sub_drivers_init(dev);
-	if (ret) {
-		DRM_ERROR("failed to initialize sub drivers\n");
-		goto err_sub_drivers_init;
-	}
-
-	//drm_mode_config_reset(dev);
+	/* drm_dev->mode_config initialization */
+	drm_mode_config_init(drm_dev);
+	hisi_drm_mode_config_init(drm_dev);
 
 	/* only support one crtc now */
-	ret = drm_vblank_init(dev, 1);
+	ret = drm_vblank_init(drm_dev, 1);
 	if (ret) {
 		DRM_ERROR("failed to initialize vblank\n");
-		goto err_vblank_init;
 	}
+
+	ret = component_bind_all(drm_dev->dev, drm_dev);
+	if (ret)
+		return ret;
 
 	DRM_DEBUG_DRIVER("exit successfully.\n");
 	return 0;
-
-err_vblank_init:
-	hisi_drm_sub_drivers_exit(dev);
-err_sub_drivers_init:
-	drm_mode_config_cleanup(dev);
-
-	return ret;
 }
 
 static const struct file_operations hisi_drm_fops = {
@@ -214,7 +150,7 @@ static struct drm_driver hisi_drm_driver = {
 
 	.name			= "hisi",
 	.desc			= "Hisilicon Terminal SoCs DRM Driver",
-	.date			= "20141224",
+	.date			= "20150718",
 	.major			= 1,
 	.minor			= 0,
 };
@@ -223,36 +159,107 @@ static struct drm_driver hisi_drm_driver = {
  * Platform driver
  */
 
-static int hisi_drm_probe(struct platform_device *pdev)
+static int compare_of(struct device *dev, void *data)
 {
-	return drm_platform_init(&hisi_drm_driver, pdev);
+	return dev->of_node == data;
 }
 
-static int hisi_drm_remove(struct platform_device *pdev)
+static int hisi_drm_bind(struct device *dev)
 {
-	drm_put_dev(platform_get_drvdata(pdev));
 
+	return drm_platform_init(&hisi_drm_driver, to_platform_device(dev));
+}
+
+static void hisi_drm_unbind(struct device *dev)
+{
+	drm_put_dev(dev_get_drvdata(dev));
+}
+
+static const struct component_master_ops hisi_drm_ops = {
+	.bind = hisi_drm_bind,
+	.unbind = hisi_drm_unbind,
+};
+
+static int hisi_drm_master_probe(struct platform_device *pdev)
+{
+	struct device *dev = &pdev->dev;
+	struct device_node *node = dev->parent->of_node;
+	struct device_node *child_np;
+	struct component_match *match = NULL;
+
+	child_np = of_get_next_available_child(node, NULL);
+
+	while (child_np) {
+		component_match_add(dev, &match, compare_of, child_np);
+		of_node_put(child_np);
+		child_np = of_get_next_available_child(node, child_np);
+	}
+
+	return component_master_add_with_match(dev, &hisi_drm_ops, match);
+}
+
+static int hisi_drm_master_remove(struct platform_device *pdev)
+{
+	component_master_del(&pdev->dev, &hisi_drm_ops);
+	return 0;
+}
+static struct platform_driver hisi_drm_master_driver = {
+	.probe = hisi_drm_master_probe,
+	.remove = hisi_drm_master_remove,
+	.driver = {
+		.owner = THIS_MODULE,
+		.name = DRIVER_NAME "__hisimaster",
+	},
+};
+
+static int hisi_drm_platform_probe(struct platform_device *pdev)
+{
+	struct device *dev = &pdev->dev;
+	struct device_node *node = dev->of_node;
+	struct platform_device *hisi_master;
+
+	of_platform_populate(node, NULL, NULL, dev);
+
+	platform_driver_register(&hisi_drm_master_driver);
+	hisi_master = platform_device_register_resndata(dev,
+			DRIVER_NAME "__hisimaster", -1,
+			NULL, 0, NULL, 0);
+	if (IS_ERR(hisi_master))
+               return PTR_ERR(hisi_master);
+
+	platform_set_drvdata(pdev, hisi_master);
 	return 0;
 }
 
-static struct of_device_id hisi_drm_of_match[] = {
-	{ .compatible = "hisilicon,hi6220-drm" },      /* hi6220 SoC drm */
-	{}
+static int hisi_drm_platform_remove(struct platform_device *pdev)
+{
+	struct platform_device *hisi_master = platform_get_drvdata(pdev);
+
+	of_platform_depopulate(&pdev->dev);
+	platform_device_unregister(hisi_master);
+	platform_driver_unregister(&hisi_drm_master_driver);
+	return 0;
+}
+
+static const struct of_device_id hisi_drm_dt_ids[] = {
+	{ .compatible = "hisilicon,display-subsystem", },
+	{ /* end node */ },
 };
-MODULE_DEVICE_TABLE(of, hisi_drm_of_match);
+MODULE_DEVICE_TABLE(of, hisi_drm_dt_ids);
 
 static struct platform_driver hisi_drm_platform_driver = {
-	.probe		= hisi_drm_probe,
-	.remove		= hisi_drm_remove,
-	.driver		= {
-		.owner	= THIS_MODULE,
-		.name	= "hisi-drm",
-		.of_match_table = hisi_drm_of_match,
+	.probe = hisi_drm_platform_probe,
+	.remove = hisi_drm_platform_remove,
+	.driver = {
+		.owner = THIS_MODULE,
+		.name = DRIVER_NAME,
+		.of_match_table = hisi_drm_dt_ids,
 	},
 };
 
 module_platform_driver(hisi_drm_platform_driver);
 
+MODULE_AUTHOR("Xinwei Kong <kong.kongxinwei@hisilicon.com>");
 MODULE_AUTHOR("Xinliang Liu <z.liuxinliang@huawei.com>");
-MODULE_DESCRIPTION("HISI DRM Driver");
-MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("hisilicon SoC DRM driver");
+MODULE_LICENSE("GPL v2");

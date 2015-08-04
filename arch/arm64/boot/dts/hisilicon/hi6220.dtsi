@@ -595,7 +595,7 @@
 		 };
 
 		display-subsystem {
-			compatible = "hisilicon,hi6220-drm";
+			compatible = "hisilicon,display-subsystem";
 			#address-cells = <2>;
 			#size-cells = <2>;
 			ranges;

@@ -2,7 +2,7 @@
  * Hisilicon Terminal SoCs drm driver
  *
  * Copyright (c) 2014-2015 Hisilicon Limited.
- * Author:
+ * Author: Xinwei Kong <kong.kongxinwei@hisilicon.com> for hisilicon
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -12,9 +12,10 @@
 
 #include <linux/bitops.h>
 #include <linux/clk.h>
+#include <linux/component.h>
 #include <video/display_timing.h>
 
-#include <drm/drmP.h>
+
 #include <drm/drm_crtc.h>
 #include <drm/drm_crtc_helper.h>
 #include <drm/drm_gem_cma_helper.h>
@@ -25,8 +26,9 @@
 #include "hisi_drm_fb.h"
 #include "hisi_drm_fbdev.h"
 #include "hisi_drm_drv.h"
+#include "hisi_drm_plane.h"
 #include "hisi_ade_reg.h"
-#include "hisi_drm_ade.h"
+#include "hisi_ade.h"
 
 #define FORCE_PIXEL_CLOCK_SAME_OR_HIGHER 0
 #define PRIMARY_CH	(ADE_CH1)
@@ -35,27 +37,11 @@
 #define to_ade_plane(p)		container_of(p, struct hisi_plane, base)
 
 
-
-struct hisi_plane {
-	struct drm_plane base;
-	void *ctx;
-	u8 ch;
-	u8 zorder;
-};
-
-struct hisi_crtc {
-	struct drm_crtc base;
-	void *ctx;
-	struct drm_display_mode *dmode;
-	bool enable;
-	u32 ch_mask;
-	u64 use_mask;
-};
-
 struct ade_context {
 	void __iomem  *base;
 	void __iomem  *media_base;
-
+	
+	int irq;
 	u32 ade_core_rate;
 	u32 media_noc_rate;
 
@@ -299,7 +285,7 @@ static void ade_power_down(struct ade_context *ctx)
 	ctx->power_on = false;
 }
 
-static void  hisi_crtc_enable(struct drm_crtc *c)
+void  hisi_crtc_enable(struct drm_crtc *c)
 {
 	struct hisi_crtc *crtc = to_ade_crtc(c);
 	struct ade_context *ctx = crtc->ctx;
@@ -324,7 +310,7 @@ static void  hisi_crtc_enable(struct drm_crtc *c)
 	DRM_DEBUG_DRIVER("exit success.\n");
 }
 
-static void hisi_crtc_disable(struct drm_crtc *c)
+void hisi_crtc_disable(struct drm_crtc *c)
 {
 	struct hisi_crtc *crtc = to_ade_crtc(c);
 	struct ade_context *ctx = crtc->ctx;
@@ -342,7 +328,7 @@ static void hisi_crtc_disable(struct drm_crtc *c)
 	DRM_DEBUG_DRIVER("exit success.\n");
 }
 
-static bool hisi_drm_crtc_mode_fixup(struct drm_crtc *c,
+bool hisi_drm_crtc_mode_fixup(struct drm_crtc *c,
 				      const struct drm_display_mode *mode,
 				      struct drm_display_mode *adj_mode)
 {
@@ -381,7 +367,7 @@ static bool hisi_drm_crtc_mode_fixup(struct drm_crtc *c,
 	return true;
 }
 
-static void hisi_drm_crtc_mode_set_nofb(struct drm_crtc *c)
+void hisi_drm_crtc_mode_set_nofb(struct drm_crtc *c)
 {
 	struct hisi_crtc *crtc = to_ade_crtc(c);
 	struct ade_context *ctx = crtc->ctx;
@@ -392,7 +378,7 @@ static void hisi_drm_crtc_mode_set_nofb(struct drm_crtc *c)
 	DRM_DEBUG_DRIVER("exit success.\n");
 }
 
-static void hisi_crtc_atomic_begin(struct drm_crtc *c)
+void hisi_crtc_atomic_begin(struct drm_crtc *c)
 {
 	struct hisi_crtc *crtc = to_ade_crtc(c);
 	struct ade_context *ctx = crtc->ctx;
@@ -472,7 +458,7 @@ static void ade_display_commit(struct hisi_crtc *crtc)
 	set_reg(base + LDI_HDMI_DSI_GT, 0x0, 1, 0);
 }
 
-static void hisi_crtc_atomic_flush(struct drm_crtc *c)
+void hisi_crtc_atomic_flush(struct drm_crtc *c)
 
 {
 	struct hisi_crtc *crtc = to_ade_crtc(c);
@@ -486,7 +472,7 @@ static void hisi_crtc_atomic_flush(struct drm_crtc *c)
 	DRM_DEBUG_DRIVER("exit success.\n");
 }
 
-static void hisi_drm_crtc_mode_prepare(struct drm_crtc *c)
+void hisi_drm_crtc_mode_prepare(struct drm_crtc *c)
 {
 	struct hisi_crtc *crtc = to_ade_crtc(c);
 	struct ade_context *ctx = crtc->ctx;
@@ -497,55 +483,12 @@ static void hisi_drm_crtc_mode_prepare(struct drm_crtc *c)
 	DRM_DEBUG_DRIVER("exit success.\n");
 }
 
-static const struct drm_crtc_helper_funcs crtc_helper_funcs = {
-	.enable		= hisi_crtc_enable,
-	.disable	= hisi_crtc_disable,
-	.prepare	= hisi_drm_crtc_mode_prepare,
-	.mode_fixup	= hisi_drm_crtc_mode_fixup,
-	.mode_set_nofb	= hisi_drm_crtc_mode_set_nofb,
-	.atomic_begin	= hisi_crtc_atomic_begin,
-	.atomic_flush	= hisi_crtc_atomic_flush,
-};
-
-static void hisi_drm_crtc_destroy(struct drm_crtc *c)
+void hisi_drm_crtc_destroy(struct drm_crtc *c)
 {
 	struct hisi_crtc *crtc = to_ade_crtc(c);
 
 	drm_crtc_cleanup(c);
 	devm_kfree(c->dev->dev, crtc);
-}
-
-static const struct drm_crtc_funcs crtc_funcs = {
-	.destroy	= hisi_drm_crtc_destroy,
-	.set_config	= drm_atomic_helper_set_config,
-	.page_flip	= drm_atomic_helper_page_flip,
-	.reset		= drm_atomic_helper_crtc_reset,
-	.atomic_duplicate_state	= drm_atomic_helper_crtc_duplicate_state,
-	.atomic_destroy_state	= drm_atomic_helper_crtc_destroy_state,
-};
-
-static struct hisi_crtc *hisi_drm_crtc_create(struct drm_device  *dev,
-						  void *ctx,
-						  struct drm_plane *p)
-{
-	struct hisi_crtc *crtc;
-	struct hisi_drm_private *private = dev->dev_private;
-	int ret;
-
-	crtc = devm_kzalloc(dev->dev, sizeof(*crtc), GFP_KERNEL);
-	if (!crtc)
-		return ERR_PTR(-ENOMEM);
-
-	ret = drm_crtc_init_with_planes(dev, &crtc->base, p,
-					NULL, &crtc_funcs);
-	if (ret)
-		return ERR_PTR(ret);
-
-	drm_crtc_helper_add(&crtc->base, &crtc_helper_funcs);
-
-	private->crtc = &crtc->base;
-	crtc->ctx = ctx;
-	return crtc;
 }
 
 static int hisi_drm_ade_dts_parse(struct platform_device *pdev,
@@ -573,10 +516,16 @@ static int hisi_drm_ade_dts_parse(struct platform_device *pdev,
 		return PTR_ERR(ctx->media_base);
 	}
 
+	ctx->irq = platform_get_irq(pdev, 0);
+	if (!ctx->irq) {
+		DRM_ERROR("failed to parse the irq\n");
+		return -ENODEV;
+	}
+
 	ctx->ade_core_clk = devm_clk_get(&pdev->dev, "clk_ade_core");
 	if (ctx->ade_core_clk == NULL) {
 		DRM_ERROR("failed to parse the ADE_CORE\n");
-	    return -ENODEV;
+		return -ENODEV;
 	}
 	ctx->media_noc_clk = devm_clk_get(&pdev->dev,
 					"aclk_codec_jpeg_src");
@@ -1074,23 +1023,13 @@ static void ade_disable_channel(struct hisi_plane *plane, struct hisi_crtc *crtc
 	DRM_DEBUG_DRIVER("exit success.\n");
 }
 
-static void hisi_plane_destroy(struct drm_plane *p)
+void hisi_plane_destroy(struct drm_plane *p)
 {
 	struct hisi_plane *plane = to_ade_plane(p);
 
 	drm_plane_cleanup(p);
 	devm_kfree(p->dev->dev, plane);
 }
-
-static struct drm_plane_funcs hisi_plane_funcs = {
-	.update_plane	= drm_atomic_helper_update_plane,
-	.disable_plane	= drm_atomic_helper_disable_plane,
-	.set_property = drm_atomic_helper_plane_set_property,
-	.destroy	= hisi_plane_destroy,
-	.reset = drm_atomic_helper_plane_reset,
-	.atomic_duplicate_state = drm_atomic_helper_plane_duplicate_state,
-	.atomic_destroy_state = drm_atomic_helper_plane_destroy_state,
-};
 
 int hisi_plane_prepare_fb(struct drm_plane *p,
 				struct drm_framebuffer *fb,
@@ -1109,7 +1048,7 @@ void hisi_plane_cleanup_fb(struct drm_plane *p,
 	DRM_DEBUG_DRIVER("exit success.\n");
 }
 
-static int hisi_plane_atomic_check(struct drm_plane *p,
+int hisi_plane_atomic_check(struct drm_plane *p,
 				     struct drm_plane_state *state)
 {
 	DRM_DEBUG_DRIVER("enter.\n");
@@ -1117,7 +1056,7 @@ static int hisi_plane_atomic_check(struct drm_plane *p,
 	return 0;
 }
 
-static void hisi_plane_atomic_update(struct drm_plane *p,
+void hisi_plane_atomic_update(struct drm_plane *p,
 				       struct drm_plane_state *old_state)
 {
 	struct hisi_plane *plane = to_ade_plane(p);
@@ -1154,14 +1093,6 @@ void hisi_plane_atomic_disable(struct drm_plane *p,
 	DRM_DEBUG_DRIVER("exit success.\n");
 }
 
-static const struct drm_plane_helper_funcs hisi_plane_helper_funcs = {
-	.prepare_fb = hisi_plane_prepare_fb,
-	.cleanup_fb = hisi_plane_cleanup_fb,
-	.atomic_check = hisi_plane_atomic_check,
-	.atomic_update = hisi_plane_atomic_update,
-	.atomic_disable = hisi_plane_atomic_disable,
-};
-
 #define ADE_CHANNEL_SCALE_UNSUPPORT 0
 #define ADE_CHANNEL_SCALE_SUPPORT 1
 
@@ -1170,7 +1101,7 @@ static const struct drm_prop_enum_list ade_ch_scale_enum_list[] = {
 	{ ADE_CHANNEL_SCALE_SUPPORT, "support" },
 };
 
-static int ade_install_plane_properties(struct drm_device *dev,
+int ade_install_plane_properties(struct drm_device *dev,
 					struct hisi_plane *plane)
 {
 	struct drm_mode_object *obj = &plane->base.base;
@@ -1250,64 +1181,69 @@ static int ade_install_plane_properties(struct drm_device *dev,
 
 }
 
-static struct hisi_plane *hisi_drm_plane_init(struct drm_device *dev,
-					   void *ctx,
-					   u32 ch,
-					   const u32 *formats,
-					   u32 formats_cnt,
-					   enum drm_plane_type type)
+static int hisi_ade_bind(struct device *dev, struct device *master,
+							void *data)
 {
 	struct hisi_plane *plane;
-	int ret;
+	struct hisi_crtc *crtc;
+	enum drm_plane_type type;
+	struct ade_context *ctx = dev_get_drvdata(dev);
+	const u32 *fmts;
+	u32 fmts_cnt;
+	int ret = 0;
+	int i;
+	
+	ctx->dev = data;
+	ctx->dev->dev = dev;
+	
+	/* plane init */
+	for (i=0; i<ADE_CH_NUM; i++) {
+		type = i == PRIMARY_CH ? DRM_PLANE_TYPE_PRIMARY :
+			DRM_PLANE_TYPE_OVERLAY;
+		fmts_cnt = ade_get_channel_formats(i, &fmts);
+		plane = hisi_drm_plane_init(ctx->dev, ctx, i, fmts, fmts_cnt, type);
+		if (IS_ERR(plane))
+			return PTR_ERR(plane);
 
-	plane = devm_kzalloc(dev->dev, sizeof(*plane), GFP_KERNEL);
-	if (!plane)
-		return ERR_PTR(-ENOMEM);
-	plane->ctx = ctx;
-	plane->ch = ch;
-	plane->zorder = ch;
-
-	DRM_DEBUG_DRIVER("plane init: ch=%d,type=%d, formats_count=%d\n",
-			ch, type, formats_cnt);
-	ret = drm_universal_plane_init(dev, &plane->base, 1,
-					&hisi_plane_funcs,
-					formats,
-					formats_cnt,
-					type);
-	if (ret) {
-		DRM_ERROR("fail to init plane\n");
-		return ERR_PTR(ret);
+		ctx->plane[i] = plane;
 	}
 
-	drm_plane_helper_add(&plane->base, &hisi_plane_helper_funcs);
+	crtc = hisi_drm_crtc_create(ctx->dev, ctx, &ctx->plane[PRIMARY_CH]->base);
+	if (IS_ERR(crtc)) {
+		DRM_ERROR("failed to crtc creat\n");
+		return PTR_ERR(crtc);
+	}
 
-	/* install  properties */
-	ade_install_plane_properties(dev, plane);
+	/* ldi irq install */
+	ret = drm_irq_install(ctx->dev, ctx->irq);
+	if (ret) {
+		DRM_ERROR("failed to install IRQ handler\n");
+		return ret;
+	}
+	
+	return ret;
 
-	return plane;
 }
+
+static void hisi_ade_unbind(struct device *dev, struct device *master,
+	void *data)
+{
+	/* do nothing */
+}
+
+static const struct component_ops hisi_ade_ops = {
+	.bind	= hisi_ade_bind,
+	.unbind	= hisi_ade_unbind,
+};
 
 static int hisi_ade_probe(struct platform_device *pdev)
 {
 	struct ade_context *ctx;
-	struct hisi_plane *plane;
-	struct hisi_crtc *crtc;
-	enum drm_plane_type type;
-	struct drm_device  *dev;
-	const u32 *fmts;
-	u32 fmts_cnt;
 	int ret;
-	int i;
 
 	DRM_DEBUG_DRIVER("enter.\n");
-	dev = dev_get_platdata(&pdev->dev);
-	if (!dev) {
-		DRM_ERROR("no platform data\n");
-		return -EINVAL;
-	}
 
-
-	ctx = devm_kzalloc(dev->dev, sizeof(*ctx), GFP_KERNEL);
+	ctx = devm_kzalloc(&pdev->dev, sizeof(*ctx), GFP_KERNEL);
 	if (!ctx) {
 		DRM_ERROR("failed to alloc the space\n");
 		return -ENOMEM;
@@ -1318,42 +1254,17 @@ static int hisi_ade_probe(struct platform_device *pdev)
 		DRM_ERROR("failed to dts parse\n");
 		return ret;
 	}
-
-	/* plane init */
-	for (i=0; i<ADE_CH_NUM; i++) {
-		type = i == PRIMARY_CH ? DRM_PLANE_TYPE_PRIMARY :
-			DRM_PLANE_TYPE_OVERLAY;
-		fmts_cnt = ade_get_channel_formats(i, &fmts);
-		plane = hisi_drm_plane_init(dev, ctx, i, fmts, fmts_cnt, type);
-		if (IS_ERR(plane))
-			return PTR_ERR(plane);
-
-		ctx->plane[i] = plane;
-	}
-
-	crtc = hisi_drm_crtc_create(dev, ctx, &ctx->plane[PRIMARY_CH]->base);
-	if (IS_ERR(crtc)) {
-		DRM_ERROR("failed to crtc creat\n");
-		return PTR_ERR(crtc);
-	}
-
-	/* ldi irq install */
-	ret = drm_irq_install(dev, platform_get_irq(pdev, 0));
-	if (ret) {
-		DRM_ERROR("failed to install IRQ handler\n");
-		return ret;
-	}
-
-	ctx->dev = dev;
-	ctx->crtc = crtc;
-
+	
+	platform_set_drvdata(pdev, ctx);
+	
+	return component_add(&pdev->dev, &hisi_ade_ops);
+	
 	DRM_DEBUG_DRIVER("drm_ade exit successfully.\n");
-
-	return 0;
 }
 
 static int hisi_ade_remove(struct platform_device *pdev)
 {
+	component_del(&pdev->dev, &hisi_ade_ops);
 	return 0;
 }
 
@@ -1363,7 +1274,8 @@ static struct of_device_id hisi_ade_of_match[] = {
 };
 MODULE_DEVICE_TABLE(of, hisi_ade_of_match);
 
-static struct platform_driver ade_driver = {
+static struct platform_driver hisi_ade_driver = {
+	.probe = hisi_ade_probe,
 	.remove = hisi_ade_remove,
 	.driver = {
 		   .name = "hisi-ade",
@@ -1372,4 +1284,9 @@ static struct platform_driver ade_driver = {
 	},
 };
 
-module_platform_driver_probe(ade_driver, hisi_ade_probe);
+module_platform_driver(hisi_ade_driver);
+
+MODULE_AUTHOR("Xinwei Kong <kong.kongxinwei@hisilicon.com>");
+MODULE_AUTHOR("Xinliang Liu <z.liuxinliang@huawei.com>");
+MODULE_DESCRIPTION("hisilicon SoC DRM driver");
+MODULE_LICENSE("GPL v2");

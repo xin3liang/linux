@@ -1,17 +1,18 @@
 /*
- *  Hisilicon Terminal SoCs drm driver
+ * Hisilicon Terminal SoCs drm driver
  *
- *  Copyright (c) 2014-2015 Hisilicon Limited.
- *  Author:
+ * Copyright (c) 2014-2015 Hisilicon Limited.
+ * Author: Xinwei Kong <kong.kongxinwei@hisilicon.com> for hisilicon
  *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License version 2 as
- *  published by the Free Software Foundation.
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  *
  */
 
 #include <linux/of_device.h>
 #include <linux/clk.h>
+#include <linux/component.h>
 #include <linux/types.h>
 
 #include <video/mipi_display.h>
@@ -27,9 +28,11 @@
 #ifdef CONFIG_DRM_HISI_FBDEV
 #include "hisi_drm_fbdev.h"
 #endif
-#include "hisi_drm_ade.h"
+#include "hisi_drm_encoder.h"
+#include "hisi_drm_connector.h"
+#include "hisi_ade.h"
 #include "hisi_mipi_reg.h"
-#include "hisi_drm_dsi.h"
+#include "hisi_dsi.h"
 
 
 #define connector_to_dsi(connector) \
@@ -45,64 +48,6 @@
 #define DEFAULT_MIPI_CLK_PERIOD_PS (1000000000 / (DEFAULT_MIPI_CLK_RATE / 1000))
 
 u8 *reg_base_mipi_dsi;
-
-struct mipi_dsi_phy_register {
-	u32 clk_t_lpx;
-	u32 clk_t_hs_prepare;
-	u32 clk_t_hs_zero;
-	u32 clk_t_hs_trial;
-	u32 clk_t_wakeup;
-	u32 data_t_lpx;
-	u32 data_t_hs_prepare;
-	u32 data_t_hs_zero;
-	u32 data_t_hs_trial;
-	u32 data_t_ta_go;
-	u32 data_t_ta_get;
-	u32 data_t_wakeup;
-	u32 rg_hstx_ckg_sel;
-	u32 rg_pll_fbd_div5f;
-	u32 rg_pll_fbd_div1f;
-	u32 rg_pll_fbd_2p;
-	u32 rg_pll_enbwt;
-	u32 rg_pll_fbd_p;
-	u32 rg_pll_fbd_s;
-	u32 rg_pll_pre_div1p;
-	u32 rg_pll_pre_p;
-	u32 rg_pll_vco_750M;
-	u32 rg_pll_lpf_rs;
-	u32 rg_pll_lpf_cs;
-	u32 phy_clklp2hs_time;
-	u32 phy_clkhs2lp_time;
-	u32 phy_lp2hs_time;
-	u32 phy_hs2lp_time;
-	u32 clk_to_data_delay;
-	u32 data_to_clk_delay;
-	u32 lane_byte_clk_kHz;
-	u32 clk_division;
-	u32 burst_mode;
-};
-
-struct hisi_dsi {
-	struct drm_encoder_slave base;
-	struct drm_connector connector;
-	struct i2c_client *client;
-	struct drm_i2c_encoder_driver *drm_i2c_driver;
-	struct clk *dsi_cfg_clk;
-	struct videomode vm;
-	int nominal_pixel_clock_kHz;
-
-	u8 __iomem *reg_base;
-	u8 color_mode;
-
-	u32 lanes;
-	u32 format;
-	struct mipi_dsi_phy_register phyreg;
-	u32 date_enable_pol;
-	u32 vc;
-	u32 mode_flags;
-
-	bool enable;
-};
 
 enum {
 	DSI_16BITS_1 = 0,
@@ -726,7 +671,7 @@ static void hisi_dsi_disable(struct hisi_dsi *dsi)
 	DRM_DEBUG_DRIVER("exit success.\n");
 }
 
-static void hisi_drm_encoder_destroy(struct drm_encoder *encoder)
+void hisi_drm_encoder_destroy(struct drm_encoder *encoder)
 {
 	struct hisi_dsi *dsi = encoder_to_dsi(encoder);
 	struct drm_encoder_slave_funcs *sfuncs = get_slave_funcs(encoder);
@@ -739,10 +684,6 @@ static void hisi_drm_encoder_destroy(struct drm_encoder *encoder)
 	kfree(dsi);
 	DRM_DEBUG_DRIVER("exit success.\n");
 }
-
-static struct drm_encoder_funcs hisi_encoder_funcs = {
-	.destroy = hisi_drm_encoder_destroy
-};
 
 static void hisi_drm_encoder_dpms(struct drm_encoder *encoder, int mode)
 {
@@ -765,7 +706,7 @@ static void hisi_drm_encoder_dpms(struct drm_encoder *encoder, int mode)
 	DRM_DEBUG_DRIVER("exit success.\n");
 }
 
-static bool
+bool
 hisi_drm_encoder_mode_fixup(struct drm_encoder *encoder,
 				const struct drm_display_mode *mode,
 				struct drm_display_mode *adjusted_mode)
@@ -782,7 +723,7 @@ hisi_drm_encoder_mode_fixup(struct drm_encoder *encoder,
 	return ret;
 }
 
-static void hisi_drm_encoder_mode_set(struct drm_encoder *encoder,
+void hisi_drm_encoder_mode_set(struct drm_encoder *encoder,
 					struct drm_display_mode *mode,
 					struct drm_display_mode *adjusted_mode)
 {
@@ -829,28 +770,21 @@ static void hisi_drm_encoder_mode_set(struct drm_encoder *encoder,
 			(u32)vm->pixelclock, dphy_freq_kHz);
 }
 
-static void hisi_drm_encoder_enable(struct drm_encoder *encoder)
+void hisi_drm_encoder_enable(struct drm_encoder *encoder)
 {
 	DRM_DEBUG_DRIVER("enter.\n");
 	hisi_drm_encoder_dpms(encoder, DRM_MODE_DPMS_ON);
 	DRM_DEBUG_DRIVER("exit success.\n");
 }
 
-static void hisi_drm_encoder_disable(struct drm_encoder *encoder)
+void hisi_drm_encoder_disable(struct drm_encoder *encoder)
 {
 	DRM_DEBUG_DRIVER("enter.\n");
 	hisi_drm_encoder_dpms(encoder, DRM_MODE_DPMS_OFF);
 	DRM_DEBUG_DRIVER("exit success.\n");
 }
 
-static struct drm_encoder_helper_funcs hisi_encoder_helper_funcs = {
-	.mode_fixup	= hisi_drm_encoder_mode_fixup,
-	.mode_set	= hisi_drm_encoder_mode_set,
-	.enable		= hisi_drm_encoder_enable,
-	.disable	= hisi_drm_encoder_disable
-};
-
-static enum drm_connector_status
+enum drm_connector_status
 hisi_dsi_detect(struct drm_connector *connector, bool force)
 {
 	struct hisi_dsi *dsi = connector_to_dsi(connector);
@@ -866,23 +800,13 @@ hisi_dsi_detect(struct drm_connector *connector, bool force)
 	return status;
 }
 
-static void hisi_dsi_connector_destroy(struct drm_connector *connector)
+void hisi_dsi_connector_destroy(struct drm_connector *connector)
 {
 	drm_connector_unregister(connector);
 	drm_connector_cleanup(connector);
 }
 
-static struct drm_connector_funcs hisi_dsi_connector_funcs = {
-	.dpms = drm_atomic_helper_connector_dpms,
-	.fill_modes = drm_helper_probe_single_connector_modes,
-	.detect = hisi_dsi_detect,
-	.destroy = hisi_dsi_connector_destroy,
-	.reset = drm_atomic_helper_connector_reset,
-	.atomic_duplicate_state = drm_atomic_helper_connector_duplicate_state,
-	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
-};
-
-static int hisi_dsi_get_modes(struct drm_connector *connector)
+int hisi_dsi_get_modes(struct drm_connector *connector)
 {
 	struct hisi_dsi *dsi __maybe_unused = connector_to_dsi(connector);
 	struct drm_encoder *encoder __maybe_unused = &dsi->base.base;
@@ -897,7 +821,7 @@ static int hisi_dsi_get_modes(struct drm_connector *connector)
 	return count;
 }
 
-static struct drm_encoder *
+struct drm_encoder *
 hisi_dsi_best_encoder(struct drm_connector *connector)
 {
 	struct hisi_dsi *dsi = connector_to_dsi(connector);
@@ -907,7 +831,7 @@ hisi_dsi_best_encoder(struct drm_connector *connector)
 	return &dsi->base.base;
 }
 
-static int hisi_drm_connector_mode_valid(struct drm_connector *connector,
+int hisi_drm_connector_mode_valid(struct drm_connector *connector,
 					  struct drm_display_mode *mode)
 {
 
@@ -926,67 +850,50 @@ static int hisi_drm_connector_mode_valid(struct drm_connector *connector,
 	return ret;
 }
 
-static struct drm_connector_helper_funcs hisi_dsi_connector_helper_funcs = {
-	.get_modes = hisi_dsi_get_modes,
-	.best_encoder =  hisi_dsi_best_encoder,
-	.mode_valid = hisi_drm_connector_mode_valid,
-};
-
-static int hisi_drm_encoder_create(struct drm_device *dev, struct hisi_dsi *dsi)
+static int hisi_dsi_bind(struct device *dev, struct device *master,
+							void *data)
 {
-	/* int ret; */
-	struct drm_encoder *encoder = &dsi->base.base;
-	int ret;
-
-	DRM_DEBUG_DRIVER("enter.\n");
-	dsi->enable = false;
-	encoder->possible_crtcs = 1;
-	drm_encoder_init(dev, encoder, &hisi_encoder_funcs, DRM_MODE_ENCODER_TMDS);
-	drm_encoder_helper_add(encoder, &hisi_encoder_helper_funcs);
-
-	ret = dsi->drm_i2c_driver->encoder_init(dsi->client, dev, &dsi->base);
+	struct hisi_dsi *dsi = dev_get_drvdata(dev);
+	int ret = 0;
+	
+	dsi->dev = data;
+	
+	ret = hisi_drm_encoder_create(dsi->dev, dsi);
 	if (ret) {
-		DRM_ERROR("drm_i2c_encoder_init error\n");
+		DRM_ERROR("failed to create encoder\n");
 		return ret;
 	}
+	hisi_drm_connector_create(dsi->dev, dsi);
 
-	if (!dsi->base.slave_funcs) {
-		DRM_ERROR("failed check encoder function\n");
-		return -ENODEV;
+	/* fbdev initialization should be put at last position */
+#ifdef CONFIG_DRM_HISI_FBDEV
+	ret = hisi_drm_fbdev_init(dsi->dev);
+	if (ret) {
+		DRM_ERROR("failed to initialize fbdev\n");
+		return ret;
 	}
-
-	return 0;
-	DRM_DEBUG_DRIVER("exit success.\n");
-}
-
-void hisi_drm_connector_create(struct drm_device *dev, struct hisi_dsi *dsi)
-{
-	int ret;
-	struct drm_encoder *encoder = &dsi->base.base;
-	struct drm_connector *connector = &dsi->connector;
-
-	DRM_DEBUG_DRIVER("enter.\n");
-	connector->polled = DRM_CONNECTOR_POLL_HPD;
-	connector->dpms = DRM_MODE_DPMS_OFF;
-	ret = drm_connector_init(encoder->dev, connector,
-					&hisi_dsi_connector_funcs,
-					DRM_MODE_CONNECTOR_HDMIA);
-	drm_connector_helper_add(connector, &hisi_dsi_connector_helper_funcs);
-	drm_connector_register(connector);
-	drm_mode_connector_attach_encoder(connector, encoder);
-#ifndef CONFIG_DRM_HISI_FBDEV
-	drm_reinit_primary_mode_group(dev);
 #endif
-	drm_mode_config_reset(dev);
-	DRM_DEBUG_DRIVER("exit success.\n");
+	return ret;
 }
+
+static void hisi_dsi_unbind(struct device *dev, struct device *master,
+	void *data)
+{
+	/* do nothing */
+}
+
+
+static const struct component_ops hisi_dsi_ops = {
+	.bind	= hisi_dsi_bind,
+	.unbind	= hisi_dsi_unbind,
+};
 
 static int hisi_dsi_probe(struct platform_device *pdev)
 {
 	int ret;
 	struct hisi_dsi *dsi;
 	struct resource *res;
-	struct drm_device *dev = dev_get_platdata(&pdev->dev);
+//	struct drm_device *dev = dev_get_platdata(&pdev->dev);
 	struct device_node *slave_node;
 	struct device_node *np = pdev->dev.of_node;
 
@@ -1046,7 +953,7 @@ static int hisi_dsi_probe(struct platform_device *pdev)
 	dsi->lanes = 3;
 	dsi->format = MIPI_DSI_FMT_RGB888;
 	dsi->mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_SYNC_PULSE;
-
+#if 0
 	ret = hisi_drm_encoder_create(dev, dsi);
 	if (ret) {
 		DRM_ERROR("failed to create encoder\n");
@@ -1054,7 +961,7 @@ static int hisi_dsi_probe(struct platform_device *pdev)
 	}
 	hisi_drm_connector_create(dev, dsi);
 
-	platform_set_drvdata(pdev, dsi);
+//	platform_set_drvdata(pdev, dsi);
 
 	/* fbdev initialization should be put at last position */
 #ifdef CONFIG_DRM_HISI_FBDEV
@@ -1064,17 +971,17 @@ static int hisi_dsi_probe(struct platform_device *pdev)
 		return ret;
 	}
 #endif
-
+#endif
+	platform_set_drvdata(pdev, dsi);
+	
+	return component_add(&pdev->dev, &hisi_dsi_ops);
+	
 	DRM_DEBUG_DRIVER("exit success.\n");
-	return 0;
 }
 
 static int hisi_dsi_remove(struct platform_device *pdev)
 {
-
-	struct hisi_dsi *dsi = dev_get_drvdata(&pdev->dev);
-
-	devm_kfree(&pdev->dev, dsi);
+	component_del(&pdev->dev, &hisi_dsi_ops);
 	return 0;
 }
 
@@ -1084,7 +991,7 @@ static struct of_device_id hisi_dsi_of_match[] = {
 };
 MODULE_DEVICE_TABLE(of, hisi_dsi_of_match);
 
-static struct platform_driver dsi_driver = {
+static struct platform_driver hisi_dsi_driver = {
 	.probe = hisi_dsi_probe,
 	.remove = hisi_dsi_remove,
 	.driver = {
@@ -1094,4 +1001,9 @@ static struct platform_driver dsi_driver = {
 	},
 };
 
-module_platform_driver(dsi_driver);
+module_platform_driver(hisi_dsi_driver);
+
+MODULE_AUTHOR("Xinwei Kong <kong.kongxinwei@hisilicon.com>");
+MODULE_AUTHOR("Xinliang Liu <z.liuxinliang@huawei.com>");
+MODULE_DESCRIPTION("hisilicon SoC DRM driver");
+MODULE_LICENSE("GPL v2");
