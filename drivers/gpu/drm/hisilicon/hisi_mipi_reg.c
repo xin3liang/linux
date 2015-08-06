@@ -9,9 +9,14 @@
  *  published by the Free Software Foundation.
  *
  */
+
 #include <linux/io.h>
 #include <linux/types.h>
+#include <drm/drmP.h>
+#include <video/videomode.h>
+#include <drm/drm_encoder_slave.h>
 #include "hisi_mipi_reg.h"
+//#include "hisi_dsi.h"
 
 void set_MIPIDSI_PWR_UP_shutdownz(u32 nVal)
 {

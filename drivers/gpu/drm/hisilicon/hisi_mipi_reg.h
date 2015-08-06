@@ -13,7 +13,7 @@
 #ifndef __HISI_MIPI_REG_H__
 #define __HISI_MIPI_REG_H__
 
-#include "hisi_drm_dsi.h"
+#include "hisi_dsi.h"
 
 #define get_dsi_virtual_addr()              (reg_base_mipi_dsi)
 

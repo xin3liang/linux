@@ -236,7 +236,7 @@ static int hisi_drm_fbdev_probe(struct drm_fb_helper *helper,
 	mode_cmd.width = sizes->surface_width;
 	mode_cmd.height = sizes->surface_height * HISI_NUM_FRAMEBUFFERS;
 	mode_cmd.pitches[0] = sizes->surface_width * bytes_per_pixel;
-	mode_cmd.pixel_format = DRM_FORMAT_RGBA8888;
+	mode_cmd.pixel_format = DRM_FORMAT_ARGB8888;
 
 	size = roundup(mode_cmd.pitches[0] * mode_cmd.height, PAGE_SIZE);
 	obj = drm_gem_cma_create(dev, size);

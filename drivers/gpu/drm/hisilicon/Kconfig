@@ -3,8 +3,6 @@ config DRM_HISI
 	depends on DRM
 	select DRM_KMS_HELPER
 	select DRM_GEM_CMA_HELPER
-	select DRM_PANEL
-	select DRM_MIPI_DSI
 	help
 	  Choose this option if you have a hisilicon terminal chipset.
 	  If M is selected the module will be called hisi-drm.
