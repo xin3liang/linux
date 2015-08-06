@@ -167,6 +167,7 @@ static int compare_of(struct device *dev, void *data)
 static int hisi_drm_bind(struct device *dev)
 {
 
+	dma_set_coherent_mask(dev, DMA_BIT_MASK(32));
 	return drm_platform_init(&hisi_drm_driver, to_platform_device(dev));
 }
 
