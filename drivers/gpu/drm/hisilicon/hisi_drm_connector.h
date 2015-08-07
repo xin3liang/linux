@@ -15,6 +15,7 @@
 
 #include "hisi_dsi.h"
 
-void hisi_drm_connector_create(struct drm_device *dev, struct hisi_dsi *dsi);
+void hisi_drm_connector_init(struct drm_device *dev, struct drm_encoder *encoder,
+							struct drm_connector *connector);
 
 #endif
