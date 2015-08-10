@@ -33,14 +33,14 @@
 
 #define DRIVER_NAME	"hisi-drm"
 
-static int hisi_drm_unload(struct drm_device *drm_dev)
+static int hisi_drm_unload(struct drm_device *dev)
 {
-	struct hisi_drm_private *private = drm_dev->dev_private;
+	struct hisi_drm_private *priv = dev->dev_private;
 
-	drm_vblank_cleanup(drm_dev);
-	drm_mode_config_cleanup(drm_dev);
-	kfree(private);
-	drm_dev->dev_private = NULL;
+	drm_vblank_cleanup(dev);
+	drm_mode_config_cleanup(dev);
+	devm_kfree(dev->dev, priv);
+	dev->dev_private = NULL;
 	return 0;
 }
 
@@ -50,44 +50,44 @@ static const struct drm_mode_config_funcs hisi_drm_mode_config_funcs = {
 	.atomic_commit = drm_atomic_helper_commit,
 };
 
-static void hisi_drm_mode_config_init(struct drm_device *drm_dev)
+static void hisi_drm_mode_config_init(struct drm_device *dev)
 {
-	drm_dev->mode_config.min_width = 0;
-	drm_dev->mode_config.min_height = 0;
+	dev->mode_config.min_width = 0;
+	dev->mode_config.min_height = 0;
 
-	drm_dev->mode_config.max_width = 2048;
-	drm_dev->mode_config.max_height = 2048;
+	dev->mode_config.max_width = 2048;
+	dev->mode_config.max_height = 2048;
 
-	drm_dev->mode_config.funcs = &hisi_drm_mode_config_funcs;
+	dev->mode_config.funcs = &hisi_drm_mode_config_funcs;
 }
 
-static int hisi_drm_load(struct drm_device *drm_dev, unsigned long flags)
+static int hisi_drm_load(struct drm_device *dev, unsigned long flags)
 {
-	struct hisi_drm_private *private;
+	struct hisi_drm_private *priv;
 	int ret;
 
-	/* debug setting */
-	drm_debug = DRM_UT_DRIVER|DRM_UT_KMS|DRM_UT_CORE|DRM_UT_PRIME|DRM_UT_ATOMIC;
+	/* debug setting
+	drm_debug = DRM_UT_DRIVER|DRM_UT_KMS; */
 	DRM_DEBUG_DRIVER("enter.\n");
 
-	private = kzalloc(sizeof(struct hisi_drm_private), GFP_KERNEL);
-	if (!private)
+	priv = devm_kzalloc(dev->dev, sizeof(*priv), GFP_KERNEL);
+	if (!priv)
 		return -ENOMEM;
 
-	drm_dev->dev_private = private;
-	dev_set_drvdata(drm_dev->dev, drm_dev);
+	dev->dev_private = priv;
+	dev_set_drvdata(dev->dev, dev);
 
-	/* drm_dev->mode_config initialization */
-	drm_mode_config_init(drm_dev);
-	hisi_drm_mode_config_init(drm_dev);
+	/* dev->mode_config initialization */
+	drm_mode_config_init(dev);
+	hisi_drm_mode_config_init(dev);
 
 	/* only support one crtc now */
-	ret = drm_vblank_init(drm_dev, 1);
+	ret = drm_vblank_init(dev, 1);
 	if (ret) {
 		DRM_ERROR("failed to initialize vblank\n");
 	}
 
-	ret = component_bind_all(drm_dev->dev, drm_dev);
+	ret = component_bind_all(dev->dev, dev);
 	if (ret)
 		return ret;
 
@@ -181,15 +181,16 @@ static const struct component_master_ops hisi_drm_ops = {
 	.unbind = hisi_drm_unbind,
 };
 
-static int hisi_drm_master_probe(struct platform_device *pdev)
+static int hisi_drm_platform_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
-	struct device_node *node = dev->parent->of_node;
+	struct device_node *node = dev->of_node;
 	struct device_node *child_np;
 	struct component_match *match = NULL;
 
-	child_np = of_get_next_available_child(node, NULL);
+	of_platform_populate(node, NULL, NULL, dev);
 
+	child_np = of_get_next_available_child(node, NULL);
 	while (child_np) {
 		component_match_add(dev, &match, compare_of, child_np);
 		of_node_put(child_np);
@@ -197,48 +198,14 @@ static int hisi_drm_master_probe(struct platform_device *pdev)
 	}
 
 	return component_master_add_with_match(dev, &hisi_drm_ops, match);
-}
 
-static int hisi_drm_master_remove(struct platform_device *pdev)
-{
-	component_master_del(&pdev->dev, &hisi_drm_ops);
-	return 0;
-}
-static struct platform_driver hisi_drm_master_driver = {
-	.probe = hisi_drm_master_probe,
-	.remove = hisi_drm_master_remove,
-	.driver = {
-		.owner = THIS_MODULE,
-		.name = DRIVER_NAME "__hisimaster",
-	},
-};
-
-static int hisi_drm_platform_probe(struct platform_device *pdev)
-{
-	struct device *dev = &pdev->dev;
-	struct device_node *node = dev->of_node;
-	struct platform_device *hisi_master;
-
-	of_platform_populate(node, NULL, NULL, dev);
-
-	platform_driver_register(&hisi_drm_master_driver);
-	hisi_master = platform_device_register_resndata(dev,
-			DRIVER_NAME "__hisimaster", -1,
-			NULL, 0, NULL, 0);
-	if (IS_ERR(hisi_master))
-               return PTR_ERR(hisi_master);
-
-	platform_set_drvdata(pdev, hisi_master);
 	return 0;
 }
 
 static int hisi_drm_platform_remove(struct platform_device *pdev)
 {
-	struct platform_device *hisi_master = platform_get_drvdata(pdev);
-
+	component_master_del(&pdev->dev, &hisi_drm_ops);
 	of_platform_depopulate(&pdev->dev);
-	platform_device_unregister(hisi_master);
-	platform_driver_unregister(&hisi_drm_master_driver);
 	return 0;
 }
 
