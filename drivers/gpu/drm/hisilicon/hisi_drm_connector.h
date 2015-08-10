@@ -13,8 +13,6 @@
 #ifndef __HISI_DRM_CONNECTOR_H__
 #define __HISI_DRM_CONNECTOR_H__
 
-#include "hisi_dsi.h"
-
 void hisi_drm_connector_init(struct drm_device *dev, struct drm_encoder *encoder,
 							struct drm_connector *connector);
 

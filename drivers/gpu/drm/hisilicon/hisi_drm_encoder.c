@@ -18,7 +18,6 @@
 #include <drm/drm_encoder_slave.h>
 #include <drm/drm_atomic_helper.h>
 
-#include "hisi_dsi.h"
 #include "hisi_drm_drv.h"
 #include "hisi_drm_encoder.h"
 

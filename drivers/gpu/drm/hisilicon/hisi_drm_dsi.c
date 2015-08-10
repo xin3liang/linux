@@ -32,8 +32,7 @@
 #include "hisi_drm_encoder.h"
 #include "hisi_drm_connector.h"
 #include "hisi_ade.h"
-#include "hisi_mipi_reg.h"
-#include "hisi_dsi.h"
+#include "hisi_dsi_reg.h"
 
 #define encoder_to_dsi(encoder) \
 	container_of(encoder, struct hisi_drm_dsi, hisi_encoder.base.base)
@@ -44,8 +43,6 @@
 #define ROUND(x, y) ((x) / (y) + ((x) % (y) * 10 / (y) >= 5 ? 1 : 0))
 
 #define DEFAULT_MIPI_CLK_PERIOD_PS (1000000000 / (DEFAULT_MIPI_CLK_RATE / 1000))
-
-u8 *reg_base_mipi_dsi;
 
 enum {
 	DSI_16BITS_1 = 0,
@@ -58,18 +55,77 @@ enum {
 	DSI_24BITS_3,
 };
 
-struct dsi_phy_seq_info {
-	u32 min_range_kHz;
-	u32 max_range_kHz;
-	u32 rg_pll_vco_750M;
-	u32 rg_hstx_ckg_sel;
-};
-
 enum {
 	DSI_NON_BURST_SYNC_PULSES = 0,
 	DSI_NON_BURST_SYNC_EVENTS,
 	DSI_BURST_SYNC_PULSES_1,
 	DSI_BURST_SYNC_PULSES_2
+};
+
+struct mipi_dsi_phy_register {
+	u32 clk_t_lpx;
+	u32 clk_t_hs_prepare;
+	u32 clk_t_hs_zero;
+	u32 clk_t_hs_trial;
+	u32 clk_t_wakeup;
+	u32 data_t_lpx;
+	u32 data_t_hs_prepare;
+	u32 data_t_hs_zero;
+	u32 data_t_hs_trial;
+	u32 data_t_ta_go;
+	u32 data_t_ta_get;
+	u32 data_t_wakeup;
+	u32 rg_hstx_ckg_sel;
+	u32 rg_pll_fbd_div5f;
+	u32 rg_pll_fbd_div1f;
+	u32 rg_pll_fbd_2p;
+	u32 rg_pll_enbwt;
+	u32 rg_pll_fbd_p;
+	u32 rg_pll_fbd_s;
+	u32 rg_pll_pre_div1p;
+	u32 rg_pll_pre_p;
+	u32 rg_pll_vco_750M;
+	u32 rg_pll_lpf_rs;
+	u32 rg_pll_lpf_cs;
+	u32 phy_clklp2hs_time;
+	u32 phy_clkhs2lp_time;
+	u32 phy_lp2hs_time;
+	u32 phy_hs2lp_time;
+	u32 clk_to_data_delay;
+	u32 data_to_clk_delay;
+	u32 lane_byte_clk_kHz;
+	u32 clk_division;
+	u32 burst_mode;
+};
+
+struct hisi_drm_dsi {
+	struct hisi_encoder hisi_encoder;
+	struct hisi_connector hisi_connector;
+#ifdef CONFIG_DRM_HISI_HAS_SLAVE_ENCODER
+	struct i2c_client *client;
+	struct drm_i2c_encoder_driver *drm_i2c_driver;
+#endif
+	struct clk *dsi_cfg_clk;
+	struct videomode vm;
+	int nominal_pixel_clock_kHz;
+	struct drm_device *dev;
+	struct mipi_dsi_phy_register phyreg;
+
+	void __iomem *base;
+	u8 color_mode;
+
+	u32 lanes;
+	u32 format;
+	u32 date_enable_pol;
+	u32 vc;
+	u32 mode_flags;
+};
+
+struct dsi_phy_seq_info {
+	u32 min_range_kHz;
+	u32 max_range_kHz;
+	u32 rg_pll_vco_750M;
+	u32 rg_hstx_ckg_sel;
 };
 
 struct dsi_phy_seq_info dphy_seq_info[] = {
@@ -84,15 +140,6 @@ struct dsi_phy_seq_info dphy_seq_info[] = {
 	{  750000,  1000000,   1,    0 },
 	{ 1000000,  1500000,   0,    0 }
 };
-
-static inline void set_reg(u8 *addr, u32 val, u32 bw, u32 bs)
-{
-	u32 mask = (1 << bw) - 1;
-	u32 tmp = inp32(addr);
-
-	tmp &= ~(mask << bs);
-	outp32(addr, tmp | ((val & mask) << bs));
-}
 
 void set_dsi_phy_rate_equal_or_faster(u32 *phy_freq_kHz,
 		struct mipi_dsi_phy_register *phyreg)
@@ -259,194 +306,131 @@ void set_dsi_phy_rate_equal_or_faster(u32 *phy_freq_kHz,
 	DRM_DEBUG_DRIVER("exit success.\n");
 }
 
+static void hisi_dsi_phy_tst_set(void __iomem *base,
+						u32 array, u32 phyreg_data)
+{
+	writel(array, base +  PHY_TST_CTRL1 );
+	wmb();
+	writel(0x00000002, base +  PHY_TST_CTRL0 );
+	wmb();
+	writel(0x00000000, base +  PHY_TST_CTRL0 );
+	wmb();
+	writel(phyreg_data, base +  PHY_TST_CTRL1 );
+	wmb();
+	writel(0x00000002, base +  PHY_TST_CTRL0 );
+	wmb();
+	writel(0x00000000, base +  PHY_TST_CTRL0 );
+}
+
 int hisi_dsi_mipi_init(struct hisi_drm_dsi *hisi_dsi)
 {
-	union MIPIDSI_PHY_STATUS_UNION  mipidsi_phy_status;
+	void __iomem *base = hisi_dsi->base;
+
+	u32 i = 0;
 	u32 hline_time = 0;
 	u32 hsa_time = 0;
 	u32 hbp_time = 0;
 	u32 pixel_clk_kHz;
-	u32 i = 0;
-	bool is_ready = false;
 	u32 delay_count = 0;
-	struct mipi_dsi_phy_register *phyreg = &hisi_dsi->phyreg;
 	int refresh_nom, refresh_real, htot, vtot, blc_hactive;
-	int tmp, tmp1;
+	int tmp, tmp1, val;
+	bool is_ready = false;
+
+	struct mipi_dsi_phy_register *phyreg = &hisi_dsi->phyreg;
 
 	pr_info("%s: lanes %d\n", __func__, hisi_dsi->lanes);
 
 	/* reset Core */
-	set_MIPIDSI_PWR_UP_shutdownz(0);
+	writel( PWR_UP_OFF, base +  PWR_UP );
 
-	set_MIPIDSI_PHY_IF_CFG_n_lanes(hisi_dsi->lanes - 1);
-	set_MIPIDSI_CLKMGR_CFG_tx_esc_clk_division(phyreg->clk_division);
+	writel((hisi_dsi->lanes - 1) | 0x30 << 8 , base +  PHY_IF_CFG );
+	writel(phyreg->clk_division, base +  CLKMGR_CFG );
 
-	set_MIPIDSI_PHY_RSTZ(0x00000000);
-	set_MIPIDSI_PHY_TST_CTRL0(0x00000000);
-	set_MIPIDSI_PHY_TST_CTRL0(0x00000001);
-	set_MIPIDSI_PHY_TST_CTRL0(0x00000000);
+	writel(0x00000000, base +  PHY_RSTZ );
+	writel(0x00000000, base +  PHY_TST_CTRL0 );
+	writel(0x00000001, base +  PHY_TST_CTRL0 );
+	writel(0x00000000, base +  PHY_TST_CTRL0 );
 
-	 /* clock lane Timing control - TLPX */
-	set_MIPIDSI_PHY_TST_CTRL1(0x10010);
-	set_MIPIDSI_PHY_TST_CTRL0(0x2);
-	set_MIPIDSI_PHY_TST_CTRL0(0x0);
-	set_MIPIDSI_PHY_TST_CTRL1(phyreg->clk_t_lpx);
-	set_MIPIDSI_PHY_TST_CTRL0(0x2);
-	set_MIPIDSI_PHY_TST_CTRL0(0x0);
+	/* clock lane Timing control - TLPX */
+	hisi_dsi_phy_tst_set(base, 0x10010, phyreg->clk_t_lpx);
 
 	/* clock lane Timing control - THS-PREPARE */
-	set_MIPIDSI_PHY_TST_CTRL1(0x10011);
-	set_MIPIDSI_PHY_TST_CTRL0(0x2);
-	set_MIPIDSI_PHY_TST_CTRL0(0x0);
-	set_MIPIDSI_PHY_TST_CTRL1(phyreg->clk_t_hs_prepare);
-	set_MIPIDSI_PHY_TST_CTRL0(0x2);
-	set_MIPIDSI_PHY_TST_CTRL0(0x0);
+	hisi_dsi_phy_tst_set(base, 0x10011, phyreg->clk_t_hs_prepare);
 
 	 /* clock lane Timing control - THS-ZERO */
-	set_MIPIDSI_PHY_TST_CTRL1(0x10012);
-	set_MIPIDSI_PHY_TST_CTRL0(0x2);
-	set_MIPIDSI_PHY_TST_CTRL0(0x0);
-	set_MIPIDSI_PHY_TST_CTRL1(phyreg->clk_t_hs_zero);
-	set_MIPIDSI_PHY_TST_CTRL0(0x2);
-	set_MIPIDSI_PHY_TST_CTRL0(0x0);
+	hisi_dsi_phy_tst_set(base, 0x10012, phyreg->clk_t_hs_zero);
 
 	/* clock lane Timing control - THS-TRAIL */
-	set_MIPIDSI_PHY_TST_CTRL1(0x10013);
-	set_MIPIDSI_PHY_TST_CTRL0(0x2);
-	set_MIPIDSI_PHY_TST_CTRL0(0x0);
-	set_MIPIDSI_PHY_TST_CTRL1(phyreg->clk_t_hs_trial);
-	set_MIPIDSI_PHY_TST_CTRL0(0x2);
-	set_MIPIDSI_PHY_TST_CTRL0(0x0);
+	hisi_dsi_phy_tst_set(base, 0x10013, phyreg->clk_t_hs_trial);
 
 	/* clock lane Timing control - TWAKEUP */
-	set_MIPIDSI_PHY_TST_CTRL1(0x10014);
-	set_MIPIDSI_PHY_TST_CTRL0(0x2);
-	set_MIPIDSI_PHY_TST_CTRL0(0x0);
-	set_MIPIDSI_PHY_TST_CTRL1(phyreg->clk_t_wakeup);
-	set_MIPIDSI_PHY_TST_CTRL0(0x2);
-	set_MIPIDSI_PHY_TST_CTRL0(0x0);
+	hisi_dsi_phy_tst_set(base, 0x10014, phyreg->clk_t_wakeup);
 
 	/* data lane */
 	for (i = 0; i < hisi_dsi->lanes; i++) {
 		/* Timing control - TLPX*/
-		set_MIPIDSI_PHY_TST_CTRL1(0x10020 + (i << 4));
-		set_MIPIDSI_PHY_TST_CTRL0(0x2);
-		set_MIPIDSI_PHY_TST_CTRL0(0x0);
-		set_MIPIDSI_PHY_TST_CTRL1(phyreg->data_t_lpx);
-		set_MIPIDSI_PHY_TST_CTRL0(0x2);
-		set_MIPIDSI_PHY_TST_CTRL0(0x0);
+		hisi_dsi_phy_tst_set(base, (0x10020 + (i << 4)),
+								phyreg->data_t_lpx);
 
 		/* Timing control - THS-PREPARE */
-		set_MIPIDSI_PHY_TST_CTRL1(0x10021 + (i << 4));
-		set_MIPIDSI_PHY_TST_CTRL0(0x2);
-		set_MIPIDSI_PHY_TST_CTRL0(0x0);
-		set_MIPIDSI_PHY_TST_CTRL1(phyreg->data_t_hs_prepare);
-		set_MIPIDSI_PHY_TST_CTRL0(0x2);
-		set_MIPIDSI_PHY_TST_CTRL0(0x0);
+		hisi_dsi_phy_tst_set(base, (0x10021 + (i << 4)),
+								phyreg->data_t_hs_prepare);
 
 		/* Timing control - THS-ZERO */
-		set_MIPIDSI_PHY_TST_CTRL1(0x10022 + (i << 4));
-		set_MIPIDSI_PHY_TST_CTRL0(0x2);
-		set_MIPIDSI_PHY_TST_CTRL0(0x0);
-		set_MIPIDSI_PHY_TST_CTRL1(phyreg->data_t_hs_zero);
-		set_MIPIDSI_PHY_TST_CTRL0(0x2);
-		set_MIPIDSI_PHY_TST_CTRL0(0x0);
+		hisi_dsi_phy_tst_set(base, (0x10022 + (i << 4)),
+								phyreg->data_t_hs_zero);
 
 		/* Timing control - THS-TRAIL */
-		set_MIPIDSI_PHY_TST_CTRL1(0x10023 + (i << 4));
-		set_MIPIDSI_PHY_TST_CTRL0(0x2);
-		set_MIPIDSI_PHY_TST_CTRL0(0x0);
-		set_MIPIDSI_PHY_TST_CTRL1(phyreg->data_t_hs_trial);
-		set_MIPIDSI_PHY_TST_CTRL0(0x2);
-		set_MIPIDSI_PHY_TST_CTRL0(0x0);
+		hisi_dsi_phy_tst_set(base, (0x10023 + (i << 4)),
+								phyreg->data_t_hs_trial);
 
 		/* Timing control - TTA-GO */
-		set_MIPIDSI_PHY_TST_CTRL1(0x10024 + (i << 4));
-		set_MIPIDSI_PHY_TST_CTRL0(0x2);
-		set_MIPIDSI_PHY_TST_CTRL0(0x0);
-		set_MIPIDSI_PHY_TST_CTRL1(phyreg->data_t_ta_go);
-		set_MIPIDSI_PHY_TST_CTRL0(0x2);
-		set_MIPIDSI_PHY_TST_CTRL0(0x0);
+		hisi_dsi_phy_tst_set(base, (0x10024 + (i << 4)),
+								phyreg->data_t_ta_go);
 
 		/* Timing control - TTA-GET */
-		set_MIPIDSI_PHY_TST_CTRL1(0x10025 + (i << 4));
-		set_MIPIDSI_PHY_TST_CTRL0(0x2);
-		set_MIPIDSI_PHY_TST_CTRL0(0x0);
-		set_MIPIDSI_PHY_TST_CTRL1(phyreg->data_t_ta_get);
-		set_MIPIDSI_PHY_TST_CTRL0(0x2);
-		set_MIPIDSI_PHY_TST_CTRL0(0x0);
+		hisi_dsi_phy_tst_set(base, (0x10025 + (i << 4)),
+								phyreg->data_t_ta_get);
 
 		/*  Timing control - TWAKEUP */
-		set_MIPIDSI_PHY_TST_CTRL1(0x10026 + (i << 4));
-		set_MIPIDSI_PHY_TST_CTRL0(0x2);
-		set_MIPIDSI_PHY_TST_CTRL0(0x0);
-		set_MIPIDSI_PHY_TST_CTRL1(phyreg->data_t_wakeup);
-		set_MIPIDSI_PHY_TST_CTRL0(0x2);
-		set_MIPIDSI_PHY_TST_CTRL0(0x0);
+		hisi_dsi_phy_tst_set(base, (0x10026 + (i << 4)),
+								phyreg->data_t_wakeup);
 	}
 
 	/* physical configuration I  */
-	set_MIPIDSI_PHY_TST_CTRL1(0x10060);
-	set_MIPIDSI_PHY_TST_CTRL0(0x2);
-	set_MIPIDSI_PHY_TST_CTRL0(0x0);
-	set_MIPIDSI_PHY_TST_CTRL1(phyreg->rg_hstx_ckg_sel);
-	set_MIPIDSI_PHY_TST_CTRL0(0x2);
-	set_MIPIDSI_PHY_TST_CTRL0(0x0);
+	hisi_dsi_phy_tst_set(base, 0x10060, phyreg->rg_hstx_ckg_sel);
 
 	/* physical configuration pll II  */
-	set_MIPIDSI_PHY_TST_CTRL1(0x10063);
-	set_MIPIDSI_PHY_TST_CTRL0(0x2);
-	set_MIPIDSI_PHY_TST_CTRL0(0x0);
-	set_MIPIDSI_PHY_TST_CTRL1((phyreg->rg_pll_fbd_div5f << 5) +
+	hisi_dsi_phy_tst_set(base, 0x10063, (phyreg->rg_pll_fbd_div5f << 5) +
 		(phyreg->rg_pll_fbd_div1f << 4) + (phyreg->rg_pll_fbd_2p << 1) +
 		phyreg->rg_pll_enbwt);
-	set_MIPIDSI_PHY_TST_CTRL0(0x2);
-	set_MIPIDSI_PHY_TST_CTRL0(0x0);
 
 	/* physical configuration pll II  */
-	set_MIPIDSI_PHY_TST_CTRL1(0x10064);
-	set_MIPIDSI_PHY_TST_CTRL0(0x2);
-	set_MIPIDSI_PHY_TST_CTRL0(0x0);
-	set_MIPIDSI_PHY_TST_CTRL1(phyreg->rg_pll_fbd_p);
-	set_MIPIDSI_PHY_TST_CTRL0(0x2);
-	set_MIPIDSI_PHY_TST_CTRL0(0x0);
+	hisi_dsi_phy_tst_set(base, 0x10064, phyreg->rg_pll_fbd_p);
 
 	/* physical configuration pll III  */
-	set_MIPIDSI_PHY_TST_CTRL1(0x10065);
-	set_MIPIDSI_PHY_TST_CTRL0(0x2);
-	set_MIPIDSI_PHY_TST_CTRL0(0x0);
-	set_MIPIDSI_PHY_TST_CTRL1((1 << 4) + phyreg->rg_pll_fbd_s);
-	set_MIPIDSI_PHY_TST_CTRL0(0x2);
-	set_MIPIDSI_PHY_TST_CTRL0(0x0);
+	hisi_dsi_phy_tst_set(base, 0x10065, phyreg->rg_pll_fbd_s);
 
 	/*physical configuration pll IV*/
-	set_MIPIDSI_PHY_TST_CTRL1(0x10066);
-	set_MIPIDSI_PHY_TST_CTRL0(0x2);
-	set_MIPIDSI_PHY_TST_CTRL0(0x0);
-	set_MIPIDSI_PHY_TST_CTRL1((phyreg->rg_pll_pre_div1p << 7) +
-		phyreg->rg_pll_pre_p);
-	set_MIPIDSI_PHY_TST_CTRL0(0x2);
-	set_MIPIDSI_PHY_TST_CTRL0(0x0);
+	hisi_dsi_phy_tst_set(base, 0x10066, (phyreg->rg_pll_pre_div1p << 7) +
+								phyreg->rg_pll_pre_p);
 
 	/*physical configuration pll V*/
-	set_MIPIDSI_PHY_TST_CTRL1(0x10067);
-	set_MIPIDSI_PHY_TST_CTRL0(0x2);
-	set_MIPIDSI_PHY_TST_CTRL0(0x0);
-	set_MIPIDSI_PHY_TST_CTRL1((5 << 5) + (phyreg->rg_pll_vco_750M << 4) +
-		(phyreg->rg_pll_lpf_rs << 2) + phyreg->rg_pll_lpf_cs);
-	set_MIPIDSI_PHY_TST_CTRL0(0x2);
-	set_MIPIDSI_PHY_TST_CTRL0(0x0);
+	hisi_dsi_phy_tst_set(base, 0x10067, (5 << 5) + (phyreg->rg_pll_vco_750M << 4) +
+					(phyreg->rg_pll_lpf_rs << 2) + phyreg->rg_pll_lpf_cs);
 
-	set_MIPIDSI_PHY_RSTZ(0x00000004);
+	writel(0x00000004, base +  PHY_RSTZ );
 	udelay(1);
-	set_MIPIDSI_PHY_RSTZ(0x00000005);
+
+	writel(0x00000005, base +  PHY_RSTZ );
 	udelay(1);
-	set_MIPIDSI_PHY_RSTZ(0x00000007);
+
+	writel(0x00000007, base +  PHY_RSTZ );
 	msleep(1);
 
 	while (1) {
-		mipidsi_phy_status.ul32 = get_MIPIDSI_PHY_STATUS();
-		if ((0x1 == mipidsi_phy_status.bits.phy_lock) || delay_count > 100) {
+		val = readl(base +  PHY_STATUS );
+		if ((0x01 & val) || delay_count > 100) {
 			is_ready = (delay_count < 100) ? true : false;
 			delay_count = 0;
 			break;
@@ -460,9 +444,8 @@ int hisi_dsi_mipi_init(struct hisi_drm_dsi *hisi_dsi)
 		DRM_INFO("phylock is not ready.\n");
 
 	while (1) {
-		mipidsi_phy_status.ul32 = get_MIPIDSI_PHY_STATUS();
-		if ((0x1 == mipidsi_phy_status.bits.phy_stopstateclklane) ||
-			delay_count > 100) {
+		val = readl(base +  PHY_STATUS );
+		if ((BIT(2) & val) || delay_count > 100) {
 			is_ready = (delay_count < 100) ? true : false;
 			break;
 		}
@@ -474,18 +457,16 @@ int hisi_dsi_mipi_init(struct hisi_drm_dsi *hisi_dsi)
 	if (!is_ready)
 		DRM_INFO("phystopstateclklane is not ready.\n");
 
+	writel(hisi_dsi->vc, base +  DPI_VCID );
+	writel(hisi_dsi->color_mode, base +  DPI_COLOR_CODING );
+	writel(hisi_dsi->date_enable_pol | 0 << 0x3 | 0 << 0x4 |
+		(hisi_dsi->vm.flags & DISPLAY_FLAGS_HSYNC_HIGH ? 0 : 1) << 0x2 |
+		(hisi_dsi->vm.flags & DISPLAY_FLAGS_VSYNC_HIGH ? 0 : 1) << 0x1,
+		base +  DPI_CFG_POL );
 
-	set_MIPIDSI_DPI_VCID(hisi_dsi->vc);
-	set_MIPIDSI_DPI_COLOR_CODING_dpi_color_coding(hisi_dsi->color_mode);
-	set_MIPIDSI_DPI_CFG_POL_hsync_active_low(
-		hisi_dsi->vm.flags & DISPLAY_FLAGS_HSYNC_HIGH ? 0 : 1);
-	set_MIPIDSI_DPI_CFG_POL_dataen_active_low(hisi_dsi->date_enable_pol);
-	set_MIPIDSI_DPI_CFG_POL_vsync_active_low(
-		hisi_dsi->vm.flags & DISPLAY_FLAGS_VSYNC_HIGH ? 0 : 1);
-	set_MIPIDSI_DPI_CFG_POL_shutd_active_low(0);
-	set_MIPIDSI_DPI_CFG_POL_colorm_active_low(0);
 	if (hisi_dsi->format == MIPI_DSI_FMT_RGB666)
-		set_MIPIDSI_DPI_COLOR_CODING_loosely18_en(1);
+		writel(1 << 0x09, base +  DPI_COLOR_CODING );
+//		writel(hisi_dsi->color_mode | 1 << 0x09, base +  DPI_COLOR_CODING );
 
 	/*
 	 * The DSI IP accepts vertical timing using lines as normal,
@@ -522,9 +503,9 @@ int hisi_dsi_mipi_init(struct hisi_drm_dsi *hisi_dsi)
 		hline_time++;
 
 	/* all specified in byte-lane clocks */
-	set_MIPIDSI_VID_HSA_TIME(hsa_time);
-	set_MIPIDSI_VID_HBP_TIME(hbp_time);
-	set_MIPIDSI_VID_HLINE_TIME(hline_time);
+	writel(hsa_time, base +  VID_HSA_TIME );
+	writel(hbp_time, base +  VID_HBP_TIME );
+	writel(hline_time, base +  VID_HLINE_TIME );
 
 	DRM_INFO("%s: pixel_clk_kHz=%d, lane_byte_clk_kHz=%d, hsa=%d, "
 		 "hbp=%d, hline=%d", __func__, pixel_clk_kHz,
@@ -533,11 +514,11 @@ int hisi_dsi_mipi_init(struct hisi_drm_dsi *hisi_dsi)
 	if (hisi_dsi->vm.vsync_len > 15)
 		hisi_dsi->vm.vsync_len = 15;
 
-	set_MIPIDSI_VID_VSA_LINES(hisi_dsi->vm.vsync_len);
-	set_MIPIDSI_VID_VBP_LINES(hisi_dsi->vm.vback_porch);
-	set_MIPIDSI_VID_VFP_LINES(hisi_dsi->vm.vfront_porch);
-	set_MIPIDSI_VID_VACTIVE_LINES(hisi_dsi->vm.vactive);
-	set_MIPIDSI_VID_PKT_SIZE(hisi_dsi->vm.hactive); /* in DPI pixel clocks */
+	writel(hisi_dsi->vm.vsync_len, base +  VID_VSA_LINES );
+	writel(hisi_dsi->vm.vback_porch, base +  VID_VBP_LINES );
+	writel(hisi_dsi->vm.vfront_porch, base +  VID_VFP_LINES );
+	writel(hisi_dsi->vm.vactive, base +  VID_VACTIVE_LINES );
+	writel(hisi_dsi->vm.hactive, base +  VID_PKT_SIZE );
 
 	refresh_nom = ((u64)hisi_dsi->nominal_pixel_clock_kHz * 1000000) /
 		      (htot * vtot);
@@ -585,46 +566,41 @@ int hisi_dsi_mipi_init(struct hisi_drm_dsi *hisi_dsi)
 		 * we disable this since it affects downstream
 		 * DSI -> HDMI converter output
 		 */
-		set_MIPIDSI_VID_MODE_CFG_lp_vsa_en(0);
-		set_MIPIDSI_VID_MODE_CFG_lp_vbp_en(0);
-		set_MIPIDSI_VID_MODE_CFG_lp_vfp_en(0);
-		set_MIPIDSI_VID_MODE_CFG_lp_vact_en(0);
-		set_MIPIDSI_VID_MODE_CFG_lp_hbp_en(0);
-		set_MIPIDSI_VID_MODE_CFG_lp_hfp_en(0);
+		writel(0x00, base +  VID_MODE_CFG );
 
 		/*VSA/VBP/VFP max transfer byte in LP mode*/
-		set_MIPIDSI_DPI_CFG_LP_TIM(0);
+		writel(0x00, base +  DPI_LP_CMD_TIM );
 		/* enable LP command transfer */
-		set_MIPIDSI_VID_MODE_CFG_lp_cmd_en(0);
+		writel(0x00, base +  VID_MODE_CFG );
 		/* config max read time */
-		set_MIPIDSI_PHY_TMR_CFG_max_rd_time(0xFF);
+		writel(0xFF, base +  PHY_TMR_CFG );
 	}
 
 	/* Configure core's phy parameters */
-	set_MIPIDSI_BTA_TO_CNT_bta_to_cnt(4095);
-	set_MIPIDSI_PHY_TMR_CFG_phy_lp2hs_time(phyreg->phy_lp2hs_time);
-	set_MIPIDSI_PHY_TMR_CFG_phy_hs2lp_time(phyreg->phy_hs2lp_time);
-	set_MIPIDSI_PHY_TMR_LPCLK_CFG_phy_clklp2hs_time(
-					phyreg->phy_clklp2hs_time);
-	set_MIPIDSI_PHY_TMR_LPCLK_CFG_phy_clkhs2lp_time(
-					phyreg->phy_clkhs2lp_time);
-	set_MIPIDSI_PHY_TMR_clk_to_data_delay(phyreg->clk_to_data_delay);
-	set_MIPIDSI_PHY_TMR_data_to_clk_delay(phyreg->data_to_clk_delay);
+	writel(0xFFF, base +  BTA_TO_CNT );
+	writel(0xFF | (phyreg->phy_lp2hs_time) << 16 |
+				(phyreg->phy_hs2lp_time) << 24,
+				base +  PHY_TMR_CFG );
+	writel((phyreg->phy_clklp2hs_time) | (phyreg->phy_clkhs2lp_time) << 16,
+					base +  PHY_TMR_LPCLK_CFG );
 
-	set_MIPIDSI_VID_MODE_CFG_frame_bta_ack_en(0);
-	set_MIPIDSI_VID_MODE_CFG_vid_mode_type(phyreg->burst_mode);
-	set_MIPIDSI_LPCLK_CTRL_auto_clklane_ctrl(0);
+	writel((phyreg->clk_to_data_delay) | (phyreg->data_to_clk_delay) << 8,
+						base +  NO_CONTINUE );
+	writel(0x00, base +  VID_MODE_CFG );
+	writel(phyreg->burst_mode, base +  VID_MODE_CFG );
+	writel(0x0, base +  LPCLK_CTRL );
 	/* for dsi read */
-	set_MIPIDSI_PCKHDL_CFG_bta_en(0);
+	writel(0x0, base +  PCKHDL_CFG );
 	/* Enable EOTP TX; Enable EDPI */
 	if (hisi_dsi->mode_flags == MIPI_DSI_MODE_VIDEO)
-		set_MIPIDSI_EDPI_CMD_SIZE(hisi_dsi->vm.hactive);
+		writel(hisi_dsi->vm.hactive, base +  EDPI_CMD_SIZE );
 
 	/*------------DSI and D-PHY Initialization-----------------*/
 
-	set_MIPIDSI_MODE_CFG(MIPIDSI_VIDEO_MODE);
-	set_MIPIDSI_LPCLK_CTRL_phy_txrequestclkhs(1);
-	set_MIPIDSI_PWR_UP_shutdownz(1);
+	writel( VIDEO_MODE, base +  MODE_CFG );
+	writel(0x1, base +  LPCLK_CTRL );
+	
+	writel( PWR_UP_ON, base +  PWR_UP );
 
 	DRM_INFO("%s , exit success!\n", __func__);
 
@@ -634,10 +610,11 @@ int hisi_dsi_mipi_init(struct hisi_drm_dsi *hisi_dsi)
 static void hisi_dsi_encoder_disable(struct drm_encoder *encoder)
 {
 	struct hisi_drm_dsi *hisi_dsi = encoder_to_dsi(encoder);
+	void __iomem *base = hisi_dsi->base;
 	
-	set_MIPIDSI_PWR_UP_shutdownz(0);
-	set_MIPIDSI_LPCLK_CTRL_phy_txrequestclkhs(0);
-	set_MIPIDSI_PHY_RSTZ(0);
+	writel( PWR_UP_OFF, base +  PWR_UP );
+	writel(0x0, base +  LPCLK_CTRL );
+	writel(0x00000000, base +  PHY_RSTZ );
 	clk_disable_unprepare(hisi_dsi->dsi_cfg_clk);
 
 }
@@ -836,7 +813,7 @@ static int hisi_dsi_probe(struct platform_device *pdev)
 
 	hisi_dsi = devm_kzalloc(&pdev->dev, sizeof(*hisi_dsi), GFP_KERNEL);
 	if (!hisi_dsi) {
-		dev_err(&pdev->dev, "failed to allocate hisi_ dsi object.\n");
+		dev_err(&pdev->dev, "failed to allocate hisi dsi object.\n");
 		ret = -ENOMEM;
 	}
 
@@ -847,11 +824,10 @@ static int hisi_dsi_probe(struct platform_device *pdev)
 	}
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	hisi_dsi->reg_base = devm_ioremap_resource(&pdev->dev, res);
-	reg_base_mipi_dsi = hisi_dsi->reg_base;
-	if (IS_ERR(hisi_dsi->reg_base)) {
+	hisi_dsi->base = devm_ioremap_resource(&pdev->dev, res);
+	if (IS_ERR(hisi_dsi->base)) {
 		dev_err(&pdev->dev, "failed to remap io region\n");
-		ret = PTR_ERR(hisi_dsi->reg_base);
+		ret = PTR_ERR(hisi_dsi->base);
 	}
 
 	ret = of_property_read_u32(pdev->dev.of_node, "vc", &hisi_dsi->vc);

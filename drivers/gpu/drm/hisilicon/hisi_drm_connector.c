@@ -18,8 +18,8 @@
 #include <drm/drm_encoder_slave.h>
 #include <drm/drm_atomic_helper.h>
 
-#include "hisi_dsi.h"
 #include "hisi_drm_encoder.h"
+#include "hisi_drm_drv.h"
 
 #define get_hisi_connector(connector) \
 	container_of(connector, struct hisi_connector, connector)
