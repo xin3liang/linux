@@ -806,6 +806,68 @@ void hisi_dsi_connector_destroy(struct drm_connector *connector)
 	drm_connector_cleanup(connector);
 }
 
+static struct drm_display_mode mode_720p = {
+	.name		= "1280x720",
+	.vrefresh	= 60,
+	.clock		= 74250,
+	.hdisplay	= 1280,
+	.hsync_start	= 1390,
+	.hsync_end	= 1430,
+	.htotal		= 1650,
+	.vdisplay	= 720,
+	.vsync_start	= 725,
+	.vsync_end	= 730,
+	.vtotal		= 750,
+	.type		= DRM_MODE_TYPE_PREFERRED | DRM_MODE_TYPE_DRIVER,
+	.flags		= DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC,
+	.width_mm	= 735,
+	.height_mm	= 420,
+};
+
+/*
+ * 800x600@60 works well, so add to defaut modes
+ */
+static struct drm_display_mode mode_800x600 = {
+	.name		= "800x600",
+	.vrefresh	= 60,
+	.clock		= 40000,
+	.hdisplay	= 800,
+	.hsync_start	= 840,
+	.hsync_end	= 968,
+	.htotal		= 1056,
+	.vdisplay	= 600,
+	.vsync_start	= 601,
+	.vsync_end	= 605,
+	.vtotal		= 628,
+	.type		= DRM_MODE_TYPE_PREFERRED | DRM_MODE_TYPE_DRIVER,
+	.flags		= DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC,
+	.width_mm	= 735,
+	.height_mm	= 420,
+};
+
+static int hisi_get_default_modes(struct drm_connector *connector)
+{
+	struct drm_display_mode *mode;
+
+	/* 1280x720@60: 720P */
+	mode = drm_mode_duplicate(connector->dev, &mode_720p);
+	if (!mode) {
+		DRM_ERROR("failed to create a new display mode\n");
+	}
+	drm_mode_probed_add(connector, mode);
+
+	/* 800x600@60 */
+	mode = drm_mode_duplicate(connector->dev, &mode_800x600);
+	if (!mode) {
+		DRM_ERROR("failed to create a new display mode\n");
+	}
+	drm_mode_probed_add(connector, mode);
+
+	return 2;
+}
+
+
+
 int hisi_dsi_get_modes(struct drm_connector *connector)
 {
 	struct hisi_dsi *dsi __maybe_unused = connector_to_dsi(connector);
@@ -815,8 +877,12 @@ int hisi_dsi_get_modes(struct drm_connector *connector)
 	int count = 0;
 
 	DRM_DEBUG_DRIVER("enter.\n");
+#if 0
 	if (sfuncs->get_modes)
 		count = sfuncs->get_modes(encoder, connector);
+#else
+	count += hisi_get_default_modes(connector);
+#endif
 	DRM_DEBUG_DRIVER("exit success. count=%d\n", count);
 	return count;
 }
