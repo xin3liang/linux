@@ -15,6 +15,12 @@
 
 #include "hisi_dsi.h"
 
-int hisi_drm_encoder_create(struct drm_device *dev, struct hisi_dsi *dsi);
+static inline struct drm_encoder_slave_funcs *
+		get_slave_funcs(struct drm_encoder *enc)
+{
+	return to_encoder_slave(enc)->slave_funcs;
+}
+
+void hisi_drm_encoder_init(struct drm_device *dev, struct drm_encoder *encoder);
 
 #endif

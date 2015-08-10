@@ -9,6 +9,13 @@ config DRM_HISI
 
 if DRM_HISI
 
+config DRM_HISI_HAS_SLAVE_ENCODER
+	bool "Support slave encoder output"
+	default y
+	help
+	  Support slave encoder output device such as DSI interface connecting
+	  HDMI convertor by i2c.
+
 config DRM_HISI_FBDEV
 	bool "Enable legacy fbdev support"
 	select DRM_KMS_FB_HELPER

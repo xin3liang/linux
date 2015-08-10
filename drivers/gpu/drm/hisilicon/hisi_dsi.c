@@ -28,17 +28,15 @@
 #ifdef CONFIG_DRM_HISI_FBDEV
 #include "hisi_drm_fbdev.h"
 #endif
+#include "hisi_drm_drv.h"
 #include "hisi_drm_encoder.h"
 #include "hisi_drm_connector.h"
 #include "hisi_ade.h"
 #include "hisi_mipi_reg.h"
 #include "hisi_dsi.h"
 
-
-#define connector_to_dsi(connector) \
-	container_of(connector, struct hisi_dsi, connector)
 #define encoder_to_dsi(encoder) \
-	container_of(encoder, struct hisi_dsi, base.base)
+	container_of(encoder, struct hisi_drm_dsi, hisi_encoder.base.base)
 
 #define DEFAULT_MIPI_CLK_RATE   19200000
 #define MAX_TX_ESC_CLK    (10)
@@ -94,12 +92,6 @@ static inline void set_reg(u8 *addr, u32 val, u32 bw, u32 bs)
 
 	tmp &= ~(mask << bs);
 	outp32(addr, tmp | ((val & mask) << bs));
-}
-
-static inline struct drm_encoder_slave_funcs *
-		get_slave_funcs(struct drm_encoder *enc)
-{
-	return to_encoder_slave(enc)->slave_funcs;
 }
 
 void set_dsi_phy_rate_equal_or_faster(u32 *phy_freq_kHz,
@@ -256,7 +248,7 @@ void set_dsi_phy_rate_equal_or_faster(u32 *phy_freq_kHz,
 	phyreg->phy_hs2lp_time = phyreg->phy_clkhs2lp_time;
 	phyreg->clk_to_data_delay = 1 + phyreg->phy_clklp2hs_time;
 	phyreg->data_to_clk_delay = ROUND(60 + 52 * ui, 8 * ui) +
-				    phyreg->phy_clkhs2lp_time;
+				phyreg->phy_clkhs2lp_time;
 
 	phyreg->lane_byte_clk_kHz = f_kHz / 8;
 	phyreg->clk_division = phyreg->lane_byte_clk_kHz / MAX_TX_ESC_CLK;
@@ -267,7 +259,7 @@ void set_dsi_phy_rate_equal_or_faster(u32 *phy_freq_kHz,
 	DRM_DEBUG_DRIVER("exit success.\n");
 }
 
-int mipi_init(struct hisi_dsi *dsi)
+int hisi_dsi_mipi_init(struct hisi_drm_dsi *hisi_dsi)
 {
 	union MIPIDSI_PHY_STATUS_UNION  mipidsi_phy_status;
 	u32 hline_time = 0;
@@ -277,16 +269,16 @@ int mipi_init(struct hisi_dsi *dsi)
 	u32 i = 0;
 	bool is_ready = false;
 	u32 delay_count = 0;
-	struct mipi_dsi_phy_register *phyreg = &dsi->phyreg;
+	struct mipi_dsi_phy_register *phyreg = &hisi_dsi->phyreg;
 	int refresh_nom, refresh_real, htot, vtot, blc_hactive;
 	int tmp, tmp1;
 
-	pr_info("%s: lanes %d\n", __func__, dsi->lanes);
+	pr_info("%s: lanes %d\n", __func__, hisi_dsi->lanes);
 
 	/* reset Core */
 	set_MIPIDSI_PWR_UP_shutdownz(0);
 
-	set_MIPIDSI_PHY_IF_CFG_n_lanes(dsi->lanes - 1);
+	set_MIPIDSI_PHY_IF_CFG_n_lanes(hisi_dsi->lanes - 1);
 	set_MIPIDSI_CLKMGR_CFG_tx_esc_clk_division(phyreg->clk_division);
 
 	set_MIPIDSI_PHY_RSTZ(0x00000000);
@@ -335,7 +327,7 @@ int mipi_init(struct hisi_dsi *dsi)
 	set_MIPIDSI_PHY_TST_CTRL0(0x0);
 
 	/* data lane */
-	for (i = 0; i < dsi->lanes; i++) {
+	for (i = 0; i < hisi_dsi->lanes; i++) {
 		/* Timing control - TLPX*/
 		set_MIPIDSI_PHY_TST_CTRL1(0x10020 + (i << 4));
 		set_MIPIDSI_PHY_TST_CTRL0(0x2);
@@ -483,16 +475,16 @@ int mipi_init(struct hisi_dsi *dsi)
 		DRM_INFO("phystopstateclklane is not ready.\n");
 
 
-	set_MIPIDSI_DPI_VCID(dsi->vc);
-	set_MIPIDSI_DPI_COLOR_CODING_dpi_color_coding(dsi->color_mode);
+	set_MIPIDSI_DPI_VCID(hisi_dsi->vc);
+	set_MIPIDSI_DPI_COLOR_CODING_dpi_color_coding(hisi_dsi->color_mode);
 	set_MIPIDSI_DPI_CFG_POL_hsync_active_low(
-		dsi->vm.flags & DISPLAY_FLAGS_HSYNC_HIGH ? 0 : 1);
-	set_MIPIDSI_DPI_CFG_POL_dataen_active_low(dsi->date_enable_pol);
+		hisi_dsi->vm.flags & DISPLAY_FLAGS_HSYNC_HIGH ? 0 : 1);
+	set_MIPIDSI_DPI_CFG_POL_dataen_active_low(hisi_dsi->date_enable_pol);
 	set_MIPIDSI_DPI_CFG_POL_vsync_active_low(
-		dsi->vm.flags & DISPLAY_FLAGS_VSYNC_HIGH ? 0 : 1);
+		hisi_dsi->vm.flags & DISPLAY_FLAGS_VSYNC_HIGH ? 0 : 1);
 	set_MIPIDSI_DPI_CFG_POL_shutd_active_low(0);
 	set_MIPIDSI_DPI_CFG_POL_colorm_active_low(0);
-	if (dsi->format == MIPI_DSI_FMT_RGB666)
+	if (hisi_dsi->format == MIPI_DSI_FMT_RGB666)
 		set_MIPIDSI_DPI_COLOR_CODING_loosely18_en(1);
 
 	/*
@@ -503,24 +495,24 @@ int mipi_init(struct hisi_dsi *dsi)
 	 * lane clocks minus hsa, hbp and active.
 	 */
 
-	htot = dsi->vm.hactive + dsi->vm.hsync_len +
-		  dsi->vm.hfront_porch + dsi->vm.hback_porch;
-	vtot =  dsi->vm.vactive + dsi->vm.vsync_len +
-		  dsi->vm.vfront_porch + dsi->vm.vback_porch;
+	htot = hisi_dsi->vm.hactive +hisi_dsi->vm.hsync_len +
+		  hisi_dsi->vm.hfront_porch + hisi_dsi->vm.hback_porch;
+	vtot =  hisi_dsi->vm.vactive + hisi_dsi->vm.vsync_len +
+		  hisi_dsi->vm.vfront_porch + hisi_dsi->vm.vback_porch;
 
-	pixel_clk_kHz = dsi->vm.pixelclock;
+	pixel_clk_kHz = hisi_dsi->vm.pixelclock;
 
-	hsa_time = (dsi->vm.hsync_len * phyreg->lane_byte_clk_kHz) /
+	hsa_time = (hisi_dsi->vm.hsync_len * phyreg->lane_byte_clk_kHz) /
 		   pixel_clk_kHz;
-	hbp_time = (dsi->vm.hback_porch * phyreg->lane_byte_clk_kHz) /
+	hbp_time = (hisi_dsi->vm.hback_porch * phyreg->lane_byte_clk_kHz) /
 		   pixel_clk_kHz;
 	hline_time  = (((u64)htot * (u64)phyreg->lane_byte_clk_kHz)) /
 		      pixel_clk_kHz;
-	blc_hactive  = (((u64)dsi->vm.hactive *
+	blc_hactive  = (((u64)hisi_dsi->vm.hactive *
 			(u64)phyreg->lane_byte_clk_kHz)) / pixel_clk_kHz;
 
 /* returns pixel clocks in dsi byte lane times, multiplied by 1000 */
-#define R(x) ((u32)((((u64)(x) * (u64)1000 * (u64)dsi->vm.pixelclock) / \
+#define R(x) ((u32)((((u64)(x) * (u64)1000 * (u64)hisi_dsi->vm.pixelclock) / \
 	      phyreg->lane_byte_clk_kHz)))
 
 	if ((R(hline_time) / 1000) > htot)
@@ -538,57 +530,57 @@ int mipi_init(struct hisi_dsi *dsi)
 		 "hbp=%d, hline=%d", __func__, pixel_clk_kHz,
 		 phyreg->lane_byte_clk_kHz, hsa_time, hbp_time, hline_time);
 
-	if (dsi->vm.vsync_len > 15)
-		dsi->vm.vsync_len = 15;
+	if (hisi_dsi->vm.vsync_len > 15)
+		hisi_dsi->vm.vsync_len = 15;
 
-	set_MIPIDSI_VID_VSA_LINES(dsi->vm.vsync_len);
-	set_MIPIDSI_VID_VBP_LINES(dsi->vm.vback_porch);
-	set_MIPIDSI_VID_VFP_LINES(dsi->vm.vfront_porch);
-	set_MIPIDSI_VID_VACTIVE_LINES(dsi->vm.vactive);
-	set_MIPIDSI_VID_PKT_SIZE(dsi->vm.hactive); /* in DPI pixel clocks */
+	set_MIPIDSI_VID_VSA_LINES(hisi_dsi->vm.vsync_len);
+	set_MIPIDSI_VID_VBP_LINES(hisi_dsi->vm.vback_porch);
+	set_MIPIDSI_VID_VFP_LINES(hisi_dsi->vm.vfront_porch);
+	set_MIPIDSI_VID_VACTIVE_LINES(hisi_dsi->vm.vactive);
+	set_MIPIDSI_VID_PKT_SIZE(hisi_dsi->vm.hactive); /* in DPI pixel clocks */
 
-	refresh_nom = ((u64)dsi->nominal_pixel_clock_kHz * 1000000) /
+	refresh_nom = ((u64)hisi_dsi->nominal_pixel_clock_kHz * 1000000) /
 		      (htot * vtot);
 
-	tmp = 1000000000 / dsi->vm.pixelclock;
+	tmp = 1000000000 / hisi_dsi->vm.pixelclock;
 	tmp1 = 1000000000 / phyreg->lane_byte_clk_kHz;
 
 	pr_info("%s: Pixel clock: %ldkHz (%d.%03dns), "
 		"DSI bytelane clock: %dkHz (%d.%03dns)\n",
-		__func__, dsi->vm.pixelclock, tmp / 1000, tmp % 1000,
+		__func__,hisi_dsi->vm.pixelclock, tmp / 1000, tmp % 1000,
 		phyreg->lane_byte_clk_kHz, tmp1 / 1000, tmp1 % 1000);
 
 	pr_info("%s:       CLK   HACT VACT REFRSH    HTOT   VTOT   HFP     HSA    HBP        VFP VBP VSA\n",
 		__func__);
 
 /* returns pixel clocks in dsi byte lane times, multiplied by 1000 */
-#define R(x) ((u32)((((u64)(x) * (u64)1000 * (u64)dsi->vm.pixelclock) / \
+#define R(x) ((u32)((((u64)(x) * (u64)1000 * (u64)hisi_dsi->vm.pixelclock) / \
 	      phyreg->lane_byte_clk_kHz)))
 
-	refresh_real = ((u64)dsi->vm.pixelclock * (u64)1000000000) /
+	refresh_real = ((u64)hisi_dsi->vm.pixelclock * (u64)1000000000) /
 		      ((u64)R(hline_time) * (u64)vtot);
 
 	pr_info("%s: nom: %6u %4u %4u %2u.%03u  %4u     %4u  %3u     %3u     %3u      %3u %3u  %3u\n",
-		__func__, dsi->nominal_pixel_clock_kHz,
-		dsi->vm.hactive, dsi->vm.vactive,
+		__func__, hisi_dsi->nominal_pixel_clock_kHz,
+		hisi_dsi->vm.hactive, hisi_dsi->vm.vactive,
 		refresh_nom / 1000, refresh_nom % 1000, htot, vtot,
-		dsi->vm.hfront_porch, dsi->vm.hsync_len,
-		dsi->vm.hback_porch, dsi->vm.vfront_porch,
-		dsi->vm.vsync_len, dsi->vm.vback_porch);
+		hisi_dsi->vm.hfront_porch, hisi_dsi->vm.hsync_len,
+		hisi_dsi->vm.hback_porch,hisi_dsi->vm.vfront_porch,
+		hisi_dsi->vm.vsync_len, hisi_dsi->vm.vback_porch);
 
 	pr_info("%s: tru: %6u %4u %4u %2u.%03u  %4u.%03u %4u  %3u.%03u %3u.%03u %3u.%03u  %3u %3u  %3u\n",
-		__func__, (u32)dsi->vm.pixelclock,
-		dsi->vm.hactive, dsi->vm.vactive,
+		__func__, (u32)hisi_dsi->vm.pixelclock,
+		hisi_dsi->vm.hactive, hisi_dsi->vm.vactive,
 		refresh_real / 1000, refresh_real % 1000,
 		R(hline_time) / 1000, R(hline_time) % 1000, vtot,
 		R(hline_time - hbp_time - hsa_time - blc_hactive) / 1000,
 		R(hline_time - hbp_time - hsa_time - blc_hactive) % 1000,
 		R(hsa_time) / 1000, R(hsa_time) % 1000,
 		R(hbp_time) / 1000, R(hbp_time) % 1000,
-		dsi->vm.vfront_porch,
-		dsi->vm.vsync_len, dsi->vm.vback_porch);
+		hisi_dsi->vm.vfront_porch,
+		hisi_dsi->vm.vsync_len, hisi_dsi->vm.vback_porch);
 
-	if (dsi->mode_flags & MIPI_DSI_MODE_VIDEO) {
+	if (hisi_dsi->mode_flags & MIPI_DSI_MODE_VIDEO) {
 		/*
 		 * we disable this since it affects downstream
 		 * DSI -> HDMI converter output
@@ -625,12 +617,12 @@ int mipi_init(struct hisi_dsi *dsi)
 	/* for dsi read */
 	set_MIPIDSI_PCKHDL_CFG_bta_en(0);
 	/* Enable EOTP TX; Enable EDPI */
-	if (dsi->mode_flags == MIPI_DSI_MODE_VIDEO)
-		set_MIPIDSI_EDPI_CMD_SIZE(dsi->vm.hactive);
+	if (hisi_dsi->mode_flags == MIPI_DSI_MODE_VIDEO)
+		set_MIPIDSI_EDPI_CMD_SIZE(hisi_dsi->vm.hactive);
 
 	/*------------DSI and D-PHY Initialization-----------------*/
 
-        set_MIPIDSI_MODE_CFG(MIPIDSI_VIDEO_MODE);
+	set_MIPIDSI_MODE_CFG(MIPIDSI_VIDEO_MODE);
 	set_MIPIDSI_LPCLK_CTRL_phy_txrequestclkhs(1);
 	set_MIPIDSI_PWR_UP_shutdownz(1);
 
@@ -639,102 +631,47 @@ int mipi_init(struct hisi_dsi *dsi)
 	return 0;
 }
 
-static void hisi_dsi_enable(struct hisi_dsi *dsi)
+static void hisi_dsi_encoder_disable(struct drm_encoder *encoder)
 {
+	struct hisi_drm_dsi *hisi_dsi = encoder_to_dsi(encoder);
+	
+	set_MIPIDSI_PWR_UP_shutdownz(0);
+	set_MIPIDSI_LPCLK_CTRL_phy_txrequestclkhs(0);
+	set_MIPIDSI_PHY_RSTZ(0);
+	clk_disable_unprepare(hisi_dsi->dsi_cfg_clk);
+
+}
+
+static void hisi_dsi_encoder_enable(struct drm_encoder *encoder)
+{
+	struct hisi_drm_dsi *hisi_dsi = encoder_to_dsi(encoder);
 	int ret;
 
-	DRM_DEBUG_DRIVER("enter.\n");
 	/* mipi dphy clock enable */
-	ret = clk_prepare_enable(dsi->dsi_cfg_clk);
+	ret = clk_prepare_enable(hisi_dsi->dsi_cfg_clk);
 	if (ret) {
 		DRM_ERROR("failed to enable dsi_cfg_clk, error=%d!\n", ret);
 		return;
 	}
 
-	ret = mipi_init(dsi);
+	ret = hisi_dsi_mipi_init(hisi_dsi);
 	if (ret) {
 		DRM_ERROR("failed to init mipi, error=%d!\n", ret);
 		return;
 	}
-	DRM_DEBUG_DRIVER("exit success.\n");
 }
 
-static void hisi_dsi_disable(struct hisi_dsi *dsi)
-{
-	DRM_DEBUG_DRIVER("enter.\n");
-
-	set_MIPIDSI_PWR_UP_shutdownz(0);
-	set_MIPIDSI_LPCLK_CTRL_phy_txrequestclkhs(0);
-	set_MIPIDSI_PHY_RSTZ(0);
-	clk_disable_unprepare(dsi->dsi_cfg_clk);
-
-	DRM_DEBUG_DRIVER("exit success.\n");
-}
-
-void hisi_drm_encoder_destroy(struct drm_encoder *encoder)
-{
-	struct hisi_dsi *dsi = encoder_to_dsi(encoder);
-	struct drm_encoder_slave_funcs *sfuncs = get_slave_funcs(encoder);
-
-	DRM_DEBUG_DRIVER("enter.\n");
-	/*release*/
-	if (sfuncs->destroy)
-		sfuncs->destroy(encoder);
-	drm_encoder_cleanup(encoder);
-	kfree(dsi);
-	DRM_DEBUG_DRIVER("exit success.\n");
-}
-
-static void hisi_drm_encoder_dpms(struct drm_encoder *encoder, int mode)
-{
-	struct hisi_dsi *dsi = encoder_to_dsi(encoder);
-	struct drm_encoder_slave_funcs *sfuncs = get_slave_funcs(encoder);
-	bool enable = (mode == DRM_MODE_DPMS_ON);
-
-	DRM_DEBUG_DRIVER("enter. dpms=%d\n", mode);
-	if (dsi->enable == enable)
-		return;
-
-	if (enable)
-		hisi_dsi_enable(dsi);
-	else
-		hisi_dsi_disable(dsi);
-	dsi->enable = enable;
-
-	if (sfuncs->dpms)
-		sfuncs->dpms(encoder, mode);
-	DRM_DEBUG_DRIVER("exit success.\n");
-}
-
-bool
-hisi_drm_encoder_mode_fixup(struct drm_encoder *encoder,
-				const struct drm_display_mode *mode,
-				struct drm_display_mode *adjusted_mode)
-{
-	struct drm_encoder_slave_funcs *sfuncs = get_slave_funcs(encoder);
-	bool ret = true;
-
-	DRM_DEBUG_DRIVER("enter.\n");
-	if (sfuncs->mode_fixup)
-		ret =  sfuncs->mode_fixup(encoder, mode, adjusted_mode);
-
-	DRM_DEBUG_DRIVER("exit success.ret=%d\n", ret);
-
-	return ret;
-}
-
-void hisi_drm_encoder_mode_set(struct drm_encoder *encoder,
+void hisi_dsi_encoder_mode_set(struct drm_encoder *encoder,
 					struct drm_display_mode *mode,
 					struct drm_display_mode *adjusted_mode)
 {
-	struct hisi_dsi *dsi = encoder_to_dsi(encoder);
-	struct videomode *vm = &dsi->vm;
-	struct drm_encoder_slave_funcs *sfuncs = get_slave_funcs(encoder);
+	struct hisi_drm_dsi *hisi_dsi = encoder_to_dsi(encoder);
+	struct videomode *vm = &hisi_dsi->vm;
 	u32 dphy_freq_kHz;
 
 	DRM_DEBUG_DRIVER("enter.\n");
 	vm->pixelclock = adjusted_mode->clock;
-	dsi->nominal_pixel_clock_kHz = mode->clock;
+	hisi_dsi->nominal_pixel_clock_kHz = mode->clock;
 
 	vm->hactive = mode->hdisplay;
 	vm->vactive = mode->vdisplay;
@@ -745,14 +682,14 @@ void hisi_drm_encoder_mode_set(struct drm_encoder *encoder,
 	vm->hback_porch = mode->htotal - mode->hsync_end;
 	vm->hsync_len = mode->hsync_end - mode->hsync_start;
 
-	dsi->lanes = 3 + !!(vm->pixelclock >= 115000);
+	hisi_dsi->lanes = 3 + !!(vm->pixelclock >= 115000);
 
-	dphy_freq_kHz = vm->pixelclock * 24 / dsi->lanes;
+	dphy_freq_kHz = vm->pixelclock * 24 / hisi_dsi->lanes;
 	/* this avoids a less-compatible DSI rate with 1.2GHz px PLL */
 	if (dphy_freq_kHz == 600000)
 		dphy_freq_kHz = 640000;
 
-	set_dsi_phy_rate_equal_or_faster(&dphy_freq_kHz, &dsi->phyreg);
+	set_dsi_phy_rate_equal_or_faster(&dphy_freq_kHz, &hisi_dsi->phyreg);
 
 	vm->flags = 0;
 	if (mode->flags & DRM_MODE_FLAG_PHSYNC)
@@ -764,46 +701,8 @@ void hisi_drm_encoder_mode_set(struct drm_encoder *encoder,
 	else if (mode->flags & DRM_MODE_FLAG_NVSYNC)
 		vm->flags |= DISPLAY_FLAGS_VSYNC_LOW;
 
-	if (sfuncs->mode_set)
-		sfuncs->mode_set(encoder, mode, adjusted_mode);
 	DRM_DEBUG_DRIVER("exit success: pixelclk=%dkHz, dphy_freq_kHz=%dkHz\n",
 			(u32)vm->pixelclock, dphy_freq_kHz);
-}
-
-void hisi_drm_encoder_enable(struct drm_encoder *encoder)
-{
-	DRM_DEBUG_DRIVER("enter.\n");
-	hisi_drm_encoder_dpms(encoder, DRM_MODE_DPMS_ON);
-	DRM_DEBUG_DRIVER("exit success.\n");
-}
-
-void hisi_drm_encoder_disable(struct drm_encoder *encoder)
-{
-	DRM_DEBUG_DRIVER("enter.\n");
-	hisi_drm_encoder_dpms(encoder, DRM_MODE_DPMS_OFF);
-	DRM_DEBUG_DRIVER("exit success.\n");
-}
-
-enum drm_connector_status
-hisi_dsi_detect(struct drm_connector *connector, bool force)
-{
-	struct hisi_dsi *dsi = connector_to_dsi(connector);
-	struct drm_encoder *encoder = &dsi->base.base;
-	struct drm_encoder_slave_funcs *sfuncs = get_slave_funcs(encoder);
-	enum drm_connector_status status = connector_status_unknown;
-
-	DRM_DEBUG_DRIVER("enter.\n");
-	if (sfuncs->detect)
-		status = sfuncs->detect(encoder, connector);
-
-	DRM_DEBUG_DRIVER("exit success. status=%d\n", status);
-	return status;
-}
-
-void hisi_dsi_connector_destroy(struct drm_connector *connector)
-{
-	drm_connector_unregister(connector);
-	drm_connector_cleanup(connector);
 }
 
 static struct drm_display_mode mode_720p = {
@@ -845,7 +744,7 @@ static struct drm_display_mode mode_800x600 = {
 	.height_mm	= 420,
 };
 
-static int hisi_get_default_modes(struct drm_connector *connector)
+static int hisi_dsi_connector_get_modes(struct drm_connector *connector)
 {
 	struct drm_display_mode *mode;
 
@@ -866,74 +765,46 @@ static int hisi_get_default_modes(struct drm_connector *connector)
 	return 2;
 }
 
+struct hisi_connector_funcs hisi_dsi_connector_ops = {
+	.get_modes = hisi_dsi_connector_get_modes,
+};
 
-
-int hisi_dsi_get_modes(struct drm_connector *connector)
-{
-	struct hisi_dsi *dsi __maybe_unused = connector_to_dsi(connector);
-	struct drm_encoder *encoder __maybe_unused = &dsi->base.base;
-	struct drm_encoder_slave_funcs *sfuncs __maybe_unused =
-		get_slave_funcs(encoder);
-	int count = 0;
-
-	DRM_DEBUG_DRIVER("enter.\n");
-#if 0
-	if (sfuncs->get_modes)
-		count = sfuncs->get_modes(encoder, connector);
-#else
-	count += hisi_get_default_modes(connector);
-#endif
-	DRM_DEBUG_DRIVER("exit success. count=%d\n", count);
-	return count;
-}
-
-struct drm_encoder *
-hisi_dsi_best_encoder(struct drm_connector *connector)
-{
-	struct hisi_dsi *dsi = connector_to_dsi(connector);
-
-	DRM_DEBUG_DRIVER("enter.\n");
-	DRM_DEBUG_DRIVER("exit success.\n");
-	return &dsi->base.base;
-}
-
-int hisi_drm_connector_mode_valid(struct drm_connector *connector,
-					  struct drm_display_mode *mode)
-{
-
-	struct hisi_dsi *dsi = connector_to_dsi(connector);
-	struct drm_encoder *encoder = &dsi->base.base;
-	struct drm_encoder_slave_funcs *sfuncs = get_slave_funcs(encoder);
-	int ret = MODE_OK;
-
-	if (sfuncs->mode_valid) {
-		ret = sfuncs->mode_valid(encoder, mode);
-		if (ret != MODE_OK)
-			return ret;
-	}
-
-	DRM_DEBUG_DRIVER("exit success. ret=%d\n", ret);
-	return ret;
-}
+struct hisi_encoder_funcs hisi_dsi_encoder_ops = {
+	.mode_set = hisi_dsi_encoder_mode_set,
+	.enable = hisi_dsi_encoder_enable,
+	.disable = hisi_dsi_encoder_disable,
+};
 
 static int hisi_dsi_bind(struct device *dev, struct device *master,
-							void *data)
+								void *data)
 {
-	struct hisi_dsi *dsi = dev_get_drvdata(dev);
+	struct hisi_drm_dsi *hisi_dsi = dev_get_drvdata(dev);
 	int ret = 0;
 	
-	dsi->dev = data;
-	
-	ret = hisi_drm_encoder_create(dsi->dev, dsi);
+	hisi_dsi->dev = data;
+
+	hisi_drm_encoder_init(hisi_dsi->dev, &hisi_dsi->hisi_encoder.base.base);
+
+#ifdef CONFIG_DRM_HISI_HAS_SLAVE_ENCODER
+	/* int ret; */
+	ret = hisi_dsi->drm_i2c_driver->encoder_init(hisi_dsi->client, hisi_dsi->dev,
+							&hisi_dsi->hisi_encoder.base);
 	if (ret) {
-		DRM_ERROR("failed to create encoder\n");
+		DRM_ERROR("drm_i2c_encoder_init error\n");
 		return ret;
 	}
-	hisi_drm_connector_create(dsi->dev, dsi);
+
+	if (!hisi_dsi->hisi_encoder.base.slave_funcs) {
+		DRM_ERROR("failed check encoder function\n");
+		return -ENODEV;
+	}
+#endif
+	hisi_drm_connector_init(hisi_dsi->dev, &hisi_dsi->hisi_encoder.base.base,
+						&hisi_dsi->hisi_connector.connector);
 
 	/* fbdev initialization should be put at last position */
 #ifdef CONFIG_DRM_HISI_FBDEV
-	ret = hisi_drm_fbdev_init(dsi->dev);
+	ret = hisi_drm_fbdev_init(hisi_dsi->dev);
 	if (ret) {
 		DRM_ERROR("failed to initialize fbdev\n");
 		return ret;
@@ -948,7 +819,6 @@ static void hisi_dsi_unbind(struct device *dev, struct device *master,
 	/* do nothing */
 }
 
-
 static const struct component_ops hisi_dsi_ops = {
 	.bind	= hisi_dsi_bind,
 	.unbind	= hisi_dsi_unbind,
@@ -957,35 +827,34 @@ static const struct component_ops hisi_dsi_ops = {
 static int hisi_dsi_probe(struct platform_device *pdev)
 {
 	int ret;
-	struct hisi_dsi *dsi;
+	struct hisi_drm_dsi *hisi_dsi;
 	struct resource *res;
-//	struct drm_device *dev = dev_get_platdata(&pdev->dev);
 	struct device_node *slave_node;
 	struct device_node *np = pdev->dev.of_node;
 
 	DRM_DEBUG_DRIVER("enter.\n");
 
-	dsi = devm_kzalloc(&pdev->dev, sizeof(*dsi), GFP_KERNEL);
-	if (!dsi) {
-		dev_err(&pdev->dev, "failed to allocate dsi object.\n");
+	hisi_dsi = devm_kzalloc(&pdev->dev, sizeof(*hisi_dsi), GFP_KERNEL);
+	if (!hisi_dsi) {
+		dev_err(&pdev->dev, "failed to allocate hisi_ dsi object.\n");
 		ret = -ENOMEM;
 	}
 
-	dsi->dsi_cfg_clk = clk_get(&pdev->dev, "pclk_dsi");
-	if (IS_ERR(dsi->dsi_cfg_clk)) {
+	hisi_dsi->dsi_cfg_clk = clk_get(&pdev->dev, "pclk_dsi");
+	if (IS_ERR(hisi_dsi->dsi_cfg_clk)) {
 		dev_info(&pdev->dev, "failed to get dsi clock");
-		ret = PTR_ERR(dsi->dsi_cfg_clk);
+		ret = PTR_ERR(hisi_dsi->dsi_cfg_clk);
 	}
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	dsi->reg_base = devm_ioremap_resource(&pdev->dev, res);
-	reg_base_mipi_dsi = dsi->reg_base;
-	if (IS_ERR(dsi->reg_base)) {
+	hisi_dsi->reg_base = devm_ioremap_resource(&pdev->dev, res);
+	reg_base_mipi_dsi = hisi_dsi->reg_base;
+	if (IS_ERR(hisi_dsi->reg_base)) {
 		dev_err(&pdev->dev, "failed to remap io region\n");
-		ret = PTR_ERR(dsi->reg_base);
+		ret = PTR_ERR(hisi_dsi->reg_base);
 	}
 
-	ret = of_property_read_u32(pdev->dev.of_node, "vc", &dsi->vc);
+	ret = of_property_read_u32(pdev->dev.of_node, "vc", &hisi_dsi->vc);
 	if (ret)
 		dev_err(&pdev->dev, "failed to get vc");
 
@@ -995,50 +864,38 @@ static int hisi_dsi_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	dsi->client = of_find_i2c_device_by_node(slave_node);
+#ifdef CONFIG_DRM_HISI_HAS_SLAVE_ENCODER
+	hisi_dsi->client = of_find_i2c_device_by_node(slave_node);
 	of_node_put(slave_node);
-	if (!dsi->client) {
+	if (!hisi_dsi->client) {
 		DRM_INFO("failed to find slave encoder i2c client\n");
 		return -EPROBE_DEFER;
 	}
 
-	if (!dsi->client->dev.driver) {
+	if (!hisi_dsi->client->dev.driver) {
 		DRM_INFO("%s: NULL client driver\n", __func__);
 		return -EPROBE_DEFER;
 	}
 
-	dsi->drm_i2c_driver = to_drm_i2c_encoder_driver(
-		to_i2c_driver(dsi->client->dev.driver));
-	if (IS_ERR(dsi->drm_i2c_driver)) {
-		pr_err("failed initialize encoder driver %ld\n", PTR_ERR(dsi->drm_i2c_driver));
+	hisi_dsi->drm_i2c_driver = to_drm_i2c_encoder_driver(
+		to_i2c_driver(hisi_dsi->client->dev.driver));
+	if (IS_ERR(hisi_dsi->drm_i2c_driver)) {
+		pr_err("failed initialize encoder driver %ld\n", PTR_ERR(hisi_dsi->drm_i2c_driver));
 		return -EPROBE_DEFER;
 	}
-
-	dsi->color_mode = DSI_24BITS_1;
-	dsi->date_enable_pol = 0;
-	dsi->lanes = 3;
-	dsi->format = MIPI_DSI_FMT_RGB888;
-	dsi->mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_SYNC_PULSE;
-#if 0
-	ret = hisi_drm_encoder_create(dev, dsi);
-	if (ret) {
-		DRM_ERROR("failed to create encoder\n");
-		return ret;
-	}
-	hisi_drm_connector_create(dev, dsi);
-
-//	platform_set_drvdata(pdev, dsi);
-
-	/* fbdev initialization should be put at last position */
-#ifdef CONFIG_DRM_HISI_FBDEV
-	ret = hisi_drm_fbdev_init(dev);
-	if (ret) {
-		DRM_ERROR("failed to initialize fbdev\n");
-		return ret;
-	}
 #endif
-#endif
-	platform_set_drvdata(pdev, dsi);
+
+	hisi_dsi->color_mode = DSI_24BITS_1;
+	hisi_dsi->date_enable_pol = 0;
+	hisi_dsi->lanes = 3;
+	hisi_dsi->format = MIPI_DSI_FMT_RGB888;
+	hisi_dsi->mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_SYNC_PULSE;
+
+	hisi_dsi->hisi_encoder.ops = &hisi_dsi_encoder_ops;
+	hisi_dsi->hisi_connector.encoder = &hisi_dsi->hisi_encoder.base.base;
+	hisi_dsi->hisi_connector.ops = &hisi_dsi_connector_ops;
+
+	platform_set_drvdata(pdev, hisi_dsi);
 	
 	return component_add(&pdev->dev, &hisi_dsi_ops);
 	
