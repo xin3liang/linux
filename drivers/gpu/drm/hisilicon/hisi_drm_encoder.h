@@ -13,8 +13,6 @@
 #ifndef __HISI_DRM_ENCODER_H__
 #define __HISI_DRM_ENCODER_H__
 
-#include "hisi_dsi.h"
-
 static inline struct drm_encoder_slave_funcs *
 		get_slave_funcs(struct drm_encoder *enc)
 {
