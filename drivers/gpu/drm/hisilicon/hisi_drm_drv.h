@@ -46,6 +46,32 @@ struct hisi_connector {
 struct hisi_drm_private {
 	struct hisi_drm_fbdev	*fbdev;
 	struct drm_crtc		*crtc;
+
+	/* plane properties */
+	struct drm_property *zpos_prop;
+	struct drm_property *alpha_prop;
+	struct drm_property *blending_prop;
+
+	/* read only capabilities properties */
+	struct drm_property *cap_scl_prop; /* 0: unsupport, 1: support */
+	struct drm_property *cap_rot_prop;  /*  */
+};
+
+enum {
+	/* no blending */
+	ALPHA_BLENDING_NONE     = 0x0100,
+	/* ONE / ONE_MINUS_SRC_ALPHA */
+	ALPHA_BLENDING_PREMULT  = 0x0105,
+	/* SRC_ALPHA / ONE_MINUS_SRC_ALPHA */
+	ALPHA_BLENDING_COVERAGE = 0x0405
+};
+
+/* plane structs  */
+struct hisi_plane_state {
+	struct drm_plane_state base;
+	u8 zpos;  /* z order */
+	u8 alpha; /* Alpha value applied to the whole plane */
+	u32 blending; /* blending cases: none, premult and coverage */
 };
 
 #endif /* __HISI_DRM_DRV_H__ */

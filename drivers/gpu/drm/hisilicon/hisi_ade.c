@@ -35,7 +35,6 @@
 #define PRIMARY_CH	(ADE_CH1)
 
 #define to_ade_crtc(c)		container_of(c, struct hisi_crtc, base)
-#define to_ade_plane(p)		container_of(p, struct hisi_plane, base)
 
 
 struct ade_context {
@@ -57,10 +56,6 @@ struct ade_context {
 
 	bool power_on;
 
-	/* plane properties */
-	struct drm_property *cap_scal_prop; /* 0: unsupport, 1: support */
-	struct drm_property *cap_rot_prop;  /*  */
-	struct drm_property *plane_zorder_prop;  /*  */
 };
 
 /* ade-format info: */
@@ -184,6 +179,12 @@ static void ade_init(struct ade_context *ctx)
 	/* clear overlay */
 	writel(0, base + ADE_OVLY1_TRANS_CFG);
 	writel(0, base + ADE_OVLY_CTL);
+	writel(0, base + ADE_OVLYX_CTL(ADE_OVLY2));
+	/* clear reset and reload regs */
+	writel(0, base + ADE_SOFT_RST_SEL0);
+	writel(0, base + ADE_SOFT_RST_SEL1);
+	writel(0xFFFFFFFF, base + ADE_RELOAD_DIS0);
+	writel(0xFFFFFFFF, base + ADE_RELOAD_DIS1);
 	/* for video set to 1, means that ade registers
 	 * became effective at frame end */
 	set_TOP_CTL_frm_end_start(base, 1);
@@ -390,20 +391,10 @@ void hisi_crtc_atomic_begin(struct drm_crtc *c)
 	DRM_DEBUG_DRIVER("exit success.\n");
 }
 
-static u32 ade_get_display_source(struct hisi_crtc *crtc)
-{
-	DRM_DEBUG_DRIVER("ch_mask=0x%X\n", crtc->ch_mask);
-
-	if (crtc->ch_mask)
-		return TOP_DISP_SRC_OVLY2;
-	else
-		return TOP_DISP_SRC_NONE;
-}
-
 /*
  * set modules' reset mode: by software or hardware
  * set modules' reload enable/disable
- * */
+ */
 static void ade_set_reset_and_reload(struct hisi_crtc *crtc)
 {
 	struct ade_context *ctx = crtc->ctx;
@@ -429,17 +420,14 @@ static void ade_display_commit(struct hisi_crtc *crtc)
 	void __iomem *base = ctx->base;
 	u32 out_w = crtc->dmode->hdisplay;
 	u32 out_h = crtc->dmode->vdisplay;
-	u32 disp_src;
+	u8 val;
 
 	/* TODO: set rotator after overlay */
 
 	/* TODO: set scale after overlay */
 
 	/* display source setting */
-	disp_src = ade_get_display_source(crtc);
-	if (disp_src == TOP_DISP_SRC_NONE)
-		return;
-	writel(disp_src, base + ADE_DISP_SRC_CFG);
+	writel(TOP_DISP_SRC_OVLY2, base + ADE_DISP_SRC_CFG);
 
 	/* ctran6 setting */
 	writel(1, base + ADE_CTRAN_DIS(ADE_CTRAN6));
@@ -449,7 +437,7 @@ static void ade_display_commit(struct hisi_crtc *crtc)
 	/* set reset mode:soft or hw, and reload modules */
 	ade_set_reset_and_reload(crtc);
 
-	DRM_INFO("ADE GO : src=%d\n", disp_src);
+	DRM_DEBUG_DRIVER("ADE GO: %dx%d \n", out_w, out_h);
 	/* enable ade */
 	wmb();
 	writel(ADE_ENABLE, base + ADE_EN);
@@ -463,12 +451,16 @@ void hisi_crtc_atomic_flush(struct drm_crtc *c)
 
 {
 	struct hisi_crtc *crtc = to_ade_crtc(c);
-	//struct drm_crtc_state *state;
+	struct ade_context *ctx = crtc->ctx;
+	void __iomem *base = ctx->base;
 
 	DRM_DEBUG_DRIVER("enter.\n");
-	/* commit to  display: LDI input setting */
 	if (crtc->enable) {
-		ade_display_commit(crtc);
+		/* set reset and reload */
+		ade_set_reset_and_reload(crtc);
+		/* flush ade regitsters */
+		wmb();
+		writel(ADE_ENABLE, base + ADE_EN);
 	}
 	DRM_DEBUG_DRIVER("exit success.\n");
 }
@@ -518,7 +510,7 @@ static int hisi_drm_ade_dts_parse(struct platform_device *pdev,
 	}
 
 	ctx->irq = platform_get_irq(pdev, 0);
-	if (!ctx->irq) {
+	if (ctx->irq < 0) {
 		DRM_ERROR("failed to parse the irq\n");
 		return -ENODEV;
 	}
@@ -871,12 +863,12 @@ static void ade_ctran_disable(struct hisi_crtc *crtc, u32 ch)
 	crtc->use_mask &= ~BIT(ADE_CTRAN_BIT_OFST + x);
 }
 
-static void ade_overlay_set(struct hisi_crtc *crtc, u8 ch, u8 zorder,
+static void ade_overlay_set(struct hisi_crtc *crtc, u8 ch, u8 zpos,
 			    u32 x0, u32 y0, u32 in_w, u32 in_h)
 {
 	struct ade_context *ctx = crtc->ctx;
 	void __iomem *base = ctx->base;
-	u8 ovly_ch = zorder;
+	u8 ovly_ch = zpos;
 	u8 x = ADE_OVLY2;
 	u32 x1 = x0 + in_w - 1;
 	u32 y1 = y0 + in_h - 1;
@@ -913,35 +905,29 @@ static void ade_overlay_set(struct hisi_crtc *crtc, u8 ch, u8 zorder,
 
 	/* when primary is enable, indicate that it's ready to output. */
 	if (ch == PRIMARY_CH) {
-		val = (in_w - 1 ) << 16 | (in_h - 1);
-		writel(val, base + ADE_OVLY_OUTPUT_SIZE(x));
-		writel(1, base + ADE_OVLYX_CTL(x));
-		crtc->use_mask |= BIT(ADE_OVLY_BIT_OFST + x);
+		  val = (in_w - 1 ) << 16 | (in_h - 1);
+		  writel(val, base + ADE_OVLY_OUTPUT_SIZE(x));
+		  writel(1, base + ADE_OVLYX_CTL(x));
+		  crtc->use_mask |= BIT(ADE_OVLY_BIT_OFST + x);
 	}
 }
 
-static void ade_overlay_disable(struct hisi_crtc *crtc, u32 ch)
+static void ade_overlay_disable(struct hisi_crtc *crtc, u32 ch, u8 zpos)
 {
 	struct ade_context *ctx = crtc->ctx;
 	void __iomem *base = ctx->base;
-	//u8 x = ADE_OVLY2;
+	u8 ovly_ch = zpos;
 	u32 val;
 
-	val = ~BIT(6) & readl(base + ADE_OVLY_CH_CTL(ch));
-	DRM_DEBUG_DRIVER("ch%d_ctl=0x%X\n", ch+1, val);
-	writel(val, base + ADE_OVLY_CH_CTL(ch));
-	val = ~(0x3 << (ch * 4) & readl(base + ADE_OVLY_CTL));
+	val = ~BIT(6) & readl(base + ADE_OVLY_CH_CTL(ovly_ch));
+	DRM_DEBUG_DRIVER("ch%d_ctl=0x%X\n", ovly_ch+1, val);
+	writel(val, base + ADE_OVLY_CH_CTL(ovly_ch));
+	val = ~(0x3 << (ovly_ch * 4)) & readl(base + ADE_OVLY_CTL);
 	DRM_DEBUG_DRIVER("ovly_ctl=0x%X\n", val);
 	writel(val, base + ADE_OVLY_CTL);
 
 	if (ch == ADE_DISP)
 		writel(0, base + ADE_CTRAN5_TRANS_CFG);
-
-	/* primary plane
-	if (ch == PRIMARY_CH) {
-		writel(0, base + ADE_OVLYX_CTL(x));
-		crtc->use_mask |= BIT(ADE_OVLY_BIT_OFST + x);
-	} */
 }
 
 static void ade_update_channel(struct hisi_plane *plane, struct hisi_crtc *crtc,
@@ -950,18 +936,24 @@ static void ade_update_channel(struct hisi_plane *plane, struct hisi_crtc *crtc,
 			  uint32_t src_x, uint32_t src_y,
 			  uint32_t src_w, uint32_t src_h)
 {
+	struct drm_plane_state	*state = plane->base.state;
+	struct hisi_plane_state *hstate = to_hisi_plane_state(state);
 	u8 ch = plane->ch;
-	u8 zorder = plane->zorder;
+	u8 zpos = hstate->zpos;
+	u8 alpha = hstate->alpha;
+	u32 blending = hstate->blending;
+	u32 rotation = state->rotation;
 	u32 fmt = ade_get_format(fb->pixel_format);
 	u32 in_w;
 	u32 in_h;
 	u32 out_w;
 	u32 out_h;
 
-
-	DRM_DEBUG_DRIVER("update channel%d, src:(%d, %d)-%dx%d, crtc:(%d, %d)-%dx%d\n",
+	DRM_DEBUG_DRIVER("channel%d: src:(%d, %d)-%dx%d, crtc:(%d, %d)-%dx%d, "
+			"zpos=%d, alpha=%d, blending=0x%x, rotation=%d\n",
 			ch+1, src_x, src_y, src_w, src_h,
-			crtc_x, crtc_y, crtc_w, crtc_h);
+			crtc_x, crtc_y, crtc_w, crtc_h,
+			zpos, alpha, blending, rotation);
 
 	/* 1) DMA setting */
 	in_w = src_w;
@@ -986,7 +978,7 @@ static void ade_update_channel(struct hisi_plane *plane, struct hisi_crtc *crtc,
 	ade_ctran_set(crtc, ch, in_w, in_h, fmt);
 
 	/* 5) overlay routing setting */
-	ade_overlay_set(crtc, ch, zorder, crtc_x, crtc_y, in_w, in_h);
+	ade_overlay_set(crtc, ch, zpos, crtc_x, crtc_y, in_w, in_h);
 
 	crtc->ch_mask |= BIT(ch);
 	DRM_DEBUG_DRIVER("exit success.\n");
@@ -994,9 +986,16 @@ static void ade_update_channel(struct hisi_plane *plane, struct hisi_crtc *crtc,
 
 static void ade_disable_channel(struct hisi_plane *plane, struct hisi_crtc *crtc)
 {
+	struct drm_plane_state	*state = plane->base.state;
+	struct hisi_plane_state *hstate = to_hisi_plane_state(state);
 	u32 ch = plane->ch;
+	u8 zpos = hstate->zpos;
 
-	DRM_DEBUG_DRIVER("disable channel%d\n", ch);
+	DRM_DEBUG_DRIVER("disable channel%d\n", ch+1);
+
+	/* reset state */
+	state->rotation = BIT(DRM_ROTATE_0);
+	hstate->zpos = ch;
 
 	/*
 	 * when primary is disable, power is down
@@ -1018,7 +1017,7 @@ static void ade_disable_channel(struct hisi_plane *plane, struct hisi_crtc *crtc
 	ade_ctran_disable(crtc, ch);
 
 	/* disable overlay routing */
-	ade_overlay_disable(crtc, ch);
+	ade_overlay_disable(crtc, ch, zpos);
 
 	crtc->ch_mask &= ~BIT(ch);
 	DRM_DEBUG_DRIVER("exit success.\n");
@@ -1026,7 +1025,7 @@ static void ade_disable_channel(struct hisi_plane *plane, struct hisi_crtc *crtc
 
 void hisi_plane_destroy(struct drm_plane *p)
 {
-	struct hisi_plane *plane = to_ade_plane(p);
+	struct hisi_plane *plane = to_hisi_plane(p);
 
 	drm_plane_cleanup(p);
 	devm_kfree(p->dev->dev, plane);
@@ -1060,11 +1059,10 @@ int hisi_plane_atomic_check(struct drm_plane *p,
 void hisi_plane_atomic_update(struct drm_plane *p,
 				       struct drm_plane_state *old_state)
 {
-	struct hisi_plane *plane = to_ade_plane(p);
+	struct hisi_plane *plane = to_hisi_plane(p);
 	struct drm_plane_state	*state	= p->state;
 	struct hisi_crtc *crtc;
 
-	DRM_DEBUG_DRIVER("enter.\n");
 	if (!state->crtc)
 		return;
 
@@ -1074,24 +1072,19 @@ void hisi_plane_atomic_update(struct drm_plane *p,
 		      state->crtc_w, state->crtc_h,
 		      state->src_x >> 16, state->src_y >> 16,
 		      state->src_w >> 16, state->src_h >> 16);
-
-	DRM_DEBUG_DRIVER("exit success.\n");
 }
 
 void hisi_plane_atomic_disable(struct drm_plane *p,
 			       struct drm_plane_state *old_state)
 {
-	struct hisi_plane *plane = to_ade_plane(p);
+	struct hisi_plane *plane = to_hisi_plane(p);
 	struct hisi_crtc *crtc;
 
-	DRM_DEBUG_DRIVER("enter.\n");
 	if (!old_state->crtc)
 		return;
 
 	crtc = to_ade_crtc(old_state->crtc);
 	ade_disable_channel(plane, crtc);
-
-	DRM_DEBUG_DRIVER("exit success.\n");
 }
 
 #define ADE_CHANNEL_SCALE_UNSUPPORT 0
@@ -1102,81 +1095,146 @@ static const struct drm_prop_enum_list ade_ch_scale_enum_list[] = {
 	{ ADE_CHANNEL_SCALE_SUPPORT, "support" },
 };
 
+static const struct drm_prop_enum_list ade_ch_blending_enum_list[] = {
+	{ ALPHA_BLENDING_NONE, "blending none" },
+	{ ALPHA_BLENDING_PREMULT, "blending premult" },
+	{ ALPHA_BLENDING_COVERAGE, "blending coverage" }
+};
+
+static const struct drm_prop_enum_list ade_rotation_enum_list[] = {
+	{ DRM_ROTATE_0,   "rotate-0" },
+	{ DRM_ROTATE_90,  "rotate-90" },
+	{ DRM_ROTATE_180, "rotate-180" },
+	{ DRM_ROTATE_270, "rotate-270" },
+	{ DRM_REFLECT_X,  "reflect-x" },
+	{ DRM_REFLECT_Y,  "reflect-y" },
+};
+
 int ade_install_plane_properties(struct drm_device *dev,
 					struct hisi_plane *plane)
 {
+	struct hisi_drm_private *priv = dev->dev_private;
 	struct drm_mode_object *obj = &plane->base.base;
 	struct ade_context *ctx = plane->ctx;
 	struct drm_property *prop;
 	u8 ch = plane->ch;
+	u64 prop_val;
 
-	/* create properties */
-	if (!ctx->cap_scal_prop) {
+	/*
+	 * create and attach scale capablity properties
+	 */
+	prop = priv->cap_scl_prop;
+	if (!prop) {
 		prop = drm_property_create_enum(dev, DRM_MODE_PROP_IMMUTABLE,
-						"scale capability",
-						ade_ch_scale_enum_list,
-						ARRAY_SIZE(ade_ch_scale_enum_list));
+				"cap_scl",
+				ade_ch_scale_enum_list,
+				ARRAY_SIZE(ade_ch_scale_enum_list));
 		if (!prop)
 			return 0;
 
-		ctx->cap_scal_prop = prop;
+		priv->cap_scl_prop = prop;
 	}
 
-	if (!ctx->cap_rot_prop) {
-		prop = drm_mode_create_rotation_property(dev,
-							 BIT(DRM_ROTATE_0) |
-							 BIT(DRM_ROTATE_90) |
-							 BIT(DRM_ROTATE_180) |
-							 BIT(DRM_ROTATE_270) |
-							 BIT(DRM_REFLECT_X) |
-							 BIT(DRM_REFLECT_Y));
+	switch(ch) {
+	case ADE_CH5:
+	case ADE_CH6:
+		prop_val = ADE_CHANNEL_SCALE_SUPPORT;
+		break;
+	default:
+		prop_val = ADE_CHANNEL_SCALE_UNSUPPORT;
+		break;
+	}
+	drm_object_attach_property(obj, prop, prop_val);
+
+
+	/*
+	 * create and attach rotation capablity properties
+	 */
+	prop = priv->cap_rot_prop;
+	if (!prop) {
+		prop = drm_property_create_bitmask(dev, DRM_MODE_PROP_IMMUTABLE,
+				"cap_rot",
+				ade_rotation_enum_list,
+				ARRAY_SIZE(ade_rotation_enum_list),
+				BIT(DRM_ROTATE_0) | BIT(DRM_ROTATE_90) |
+				BIT(DRM_ROTATE_180) | BIT(DRM_ROTATE_270) |
+				BIT(DRM_REFLECT_X) | BIT(DRM_REFLECT_Y));
 		if (!prop)
 			return 0;
 
-		ctx->cap_rot_prop = prop;
+		priv->cap_rot_prop = prop;
 	}
 
-	if (!ctx->plane_zorder_prop) {
+	switch(ch) {
+	case ADE_CH5:
+	case ADE_CH6:
+		prop_val = BIT(DRM_ROTATE_0) | BIT(DRM_ROTATE_90) |
+			BIT(DRM_ROTATE_180) | BIT(DRM_ROTATE_270) |
+			BIT(DRM_REFLECT_X) | BIT(DRM_REFLECT_Y);
+		break;
+	default:
+		prop_val = BIT(DRM_ROTATE_0);
+		break;
+	}
+	drm_object_attach_property(obj, prop, prop_val);
+
+
+	/*
+	 * create and attach zpos properties
+	 */
+	prop = priv->zpos_prop;
+	if (!prop) {
 		prop = drm_property_create_range(dev, 0, "zpos", 0,
 						ADE_CH_NUM - 1);
 		if (!prop)
 			return 0;
 
-		ctx->plane_zorder_prop = prop;
+		priv->zpos_prop = prop;
 	}
+	drm_object_attach_property(obj, prop, ch);
 
-	/* attach rotation capability properties */
-	switch(ch) {
-	case ADE_CH5:
-	case ADE_CH6:
-		drm_object_attach_property(obj, ctx->cap_rot_prop,
-					BIT(DRM_ROTATE_0) |
-					BIT(DRM_ROTATE_90) |
-					BIT(DRM_ROTATE_180) |
-					BIT(DRM_ROTATE_270) |
-					BIT(DRM_REFLECT_X) |
-					BIT(DRM_REFLECT_Y));
-		break;
-	default:
-		drm_object_attach_property(obj, ctx->cap_rot_prop, DRM_ROTATE_0);
-		break;
+	/*
+	 * create and attach rotation properties
+	 */
+	prop = dev->mode_config.rotation_property;
+	if (!prop) {
+		prop = drm_mode_create_rotation_property(dev,
+				BIT(DRM_ROTATE_0) | BIT(DRM_ROTATE_90) |
+				BIT(DRM_ROTATE_180) | BIT(DRM_ROTATE_270) |
+				BIT(DRM_REFLECT_X) | BIT(DRM_REFLECT_Y));
+		if (!prop)
+			return 0;
+		dev->mode_config.rotation_property = prop;
 	}
+	drm_object_attach_property(obj, prop, DRM_ROTATE_0);
 
-	/* attach scale capability properties */
-	switch(ch) {
-	case ADE_CH5:
-	case ADE_CH6:
-		drm_object_attach_property(obj, ctx->cap_scal_prop,
-				ADE_CHANNEL_SCALE_SUPPORT);
-		break;
-	default:
-		drm_object_attach_property(obj, ctx->cap_scal_prop,
-				ADE_CHANNEL_SCALE_UNSUPPORT);
-		break;
+	/*
+	 * create and attach alpha properties
+	 */
+	prop = priv->alpha_prop;
+	if (!prop) {
+		prop = drm_property_create_range(dev, 0, "alpha", 0, 255);
+		if (!prop)
+			return 0;
+
+		priv->alpha_prop = prop;
 	}
+	drm_object_attach_property(obj, prop, 255);
 
-	/* attach zorder properties */
-	drm_object_attach_property(obj, ctx->plane_zorder_prop, plane->zorder);
+	/*
+	 * create and attach blending properties
+	 */
+	prop = priv->blending_prop;
+	if (!prop) {
+		prop = drm_property_create_enum(dev, 0,	"blending",
+				ade_ch_blending_enum_list,
+				ARRAY_SIZE(ade_ch_blending_enum_list));
+		if (!prop)
+			return 0;
+
+		priv->blending_prop = prop;
+	}
+	drm_object_attach_property(obj, prop, ALPHA_BLENDING_NONE);
 
 	return 0;
 
@@ -1195,7 +1253,6 @@ static int hisi_ade_bind(struct device *dev, struct device *master,
 	int i;
 	
 	ctx->dev = data;
-	ctx->dev->dev = dev;
 	
 	/* plane init */
 	for (i=0; i<ADE_CH_NUM; i++) {

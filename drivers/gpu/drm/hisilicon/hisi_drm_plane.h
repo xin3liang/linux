@@ -13,6 +13,9 @@
 #ifndef __HISI_DRM_PLANE_H__
 #define __HISI_DRM_PLANE_H__
 
+#define to_hisi_plane(p)	container_of(p, struct hisi_plane, base)
+#define to_hisi_plane_state(s)	container_of(s, struct hisi_plane_state, base)
+
 struct hisi_plane *hisi_drm_plane_init(struct drm_device *dev,
 					   void *ctx,
 					   u32 ch,

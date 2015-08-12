@@ -17,7 +17,6 @@ struct hisi_plane {
 	struct drm_plane base;
 	void *ctx;
 	u8 ch;
-	u8 zorder;
 };
 
 struct hisi_crtc {
