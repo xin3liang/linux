@@ -1152,8 +1152,7 @@ int ade_install_plane_properties(struct drm_device *dev,
 	 */
 	prop = priv->cap_rot_prop;
 	if (!prop) {
-		prop = drm_property_create_bitmask(dev, DRM_MODE_PROP_IMMUTABLE,
-				"cap_rot",
+		prop = drm_property_create_bitmask(dev, 0, "cap_rot",
 				ade_rotation_enum_list,
 				ARRAY_SIZE(ade_rotation_enum_list),
 				BIT(DRM_ROTATE_0) | BIT(DRM_ROTATE_90) |
@@ -1226,7 +1225,8 @@ int ade_install_plane_properties(struct drm_device *dev,
 	 */
 	prop = priv->blending_prop;
 	if (!prop) {
-		prop = drm_property_create_enum(dev, 0,	"blending",
+		prop = drm_property_create_enum(dev, DRM_MODE_PROP_IMMUTABLE,
+				"blending",
 				ade_ch_blending_enum_list,
 				ARRAY_SIZE(ade_ch_blending_enum_list));
 		if (!prop)
