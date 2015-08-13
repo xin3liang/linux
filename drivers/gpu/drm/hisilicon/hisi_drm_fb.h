@@ -9,6 +9,7 @@
  * published by the Free Software Foundation.
  *
  */
+
 #ifndef __HISI_DRM_FB_H__
 #define __HISI_DRM_FB_H__
 

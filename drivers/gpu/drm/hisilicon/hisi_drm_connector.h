@@ -13,6 +13,19 @@
 #ifndef __HISI_DRM_CONNECTOR_H__
 #define __HISI_DRM_CONNECTOR_H__
 
+struct hisi_connector_funcs {
+	enum drm_connector_status (*detect)
+					(struct drm_connector *connector);
+	int (*get_modes)(struct drm_connector *connector);
+	int (*modes_valid)(struct drm_connector *connector);
+};
+
+struct hisi_connector {
+	struct drm_connector connector;
+	struct drm_encoder *encoder;
+	void *ops;
+};
+
 void hisi_drm_connector_init(struct drm_device *dev, struct drm_encoder *encoder,
 							struct drm_connector *connector);
 

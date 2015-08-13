@@ -10,8 +10,8 @@
  *
  */
 
-#ifndef __HISI_ADE_H__
-#define __HISI_ADE_H__
+#ifndef __HISI_ADE_REG_H__
+#define __HISI_ADE_REG_H__
 
 /********** ADE Register Offset ***********/
 #define ADE_CTRL                (0x4)

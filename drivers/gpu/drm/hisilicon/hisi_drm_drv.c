@@ -1,4 +1,5 @@
 /*
+#endif
  * Hisilicon Terminal SoCs drm driver
  *
  * Copyright (c) 2014-2015 Hisilicon Limited.
@@ -10,27 +11,26 @@
  *
  */
 
-#include <drm/drmP.h>
-
-#include <linux/component.h>
-#include <linux/debugfs.h>
-#include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/kernel.h>
+#include <linux/debugfs.h>
 #include <linux/of_platform.h>
+#include <linux/component.h>
 
+#include <drm/drmP.h>
 #include <drm/drm_fb_helper.h>
 #include <drm/drm_crtc_helper.h>
+#include <drm/drm_atomic_helper.h>
 #include <drm/drm_encoder_slave.h>
 #include <drm/drm_gem_cma_helper.h>
 #include <drm/drm_fb_cma_helper.h>
-#include <drm/drm_atomic_helper.h>
 
-#ifdef CONFIG_DRM_HISI_FBDEV
-#include "hisi_drm_fbdev.h"
-#endif
 #include "hisi_drm_drv.h"
 #include "hisi_drm_fb.h"
 #include "hisi_ade.h"
+#ifdef CONFIG_DRM_HISI_FBDEV
+#include "hisi_drm_fbdev.h"
+#endif
 
 #define DRIVER_NAME	"hisi-drm"
 
@@ -67,8 +67,8 @@ static int hisi_drm_load(struct drm_device *dev, unsigned long flags)
 	struct hisi_drm_private *priv;
 	int ret;
 
-	/* debug setting */
-	drm_debug = DRM_UT_DRIVER;
+	/* debug setting
+	drm_debug = DRM_UT_DRIVER|DRM_UT_KMS; */
 	DRM_DEBUG_DRIVER("enter.\n");
 
 	priv = devm_kzalloc(dev->dev, sizeof(*priv), GFP_KERNEL);
