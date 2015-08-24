@@ -12,9 +12,28 @@
 
 #ifndef __HISI_DRM_CRTC_H__
 #define __HISI_DRM_CRTC_H__
-#include "hisi_handle.h"
 
-struct hisi_crtc *hisi_drm_crtc_init (struct drm_device *drm_dev,
-	struct hisi_handle *hisi_handle, struct drm_plane *p);
+struct hisi_crtc {
+	struct drm_crtc base;
+	void *ops;
+	bool enable;
+};
+
+struct hisi_crtc_ops {
+	void (*disable)(struct hisi_crtc *hcrtc);
+	void (*enable)(struct hisi_crtc *hcrtc);
+	void (*mode_prepare)(struct hisi_crtc *hcrtc);
+	bool (*mode_fixup)(struct hisi_crtc *hcrtc,
+			   const struct drm_display_mode *mode,
+			   struct drm_display_mode *adj_mode);
+	void (*mode_set_nofb)(struct hisi_crtc *hcrtc);
+	void (*atomic_begin)(struct hisi_crtc *hcrtc);
+	void (*atomic_flush)(struct hisi_crtc *hcrtc);
+	void (*destroy)(struct hisi_crtc *hcrtc);
+};
+
+extern int hisi_drm_crtc_init(struct drm_device *dev,
+		       struct hisi_crtc *crtc,
+		       struct drm_plane *plane);
 
 #endif

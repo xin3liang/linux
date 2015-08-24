@@ -15,13 +15,12 @@
 #include <drm/drm_crtc_helper.h>
 #include <drm/drm_fb_helper.h>
 #include <drm/drm_gem_cma_helper.h>
+
 #include "hisi_drm_fb.h"
 #include "hisi_drm_fbdev.h"
 #include "hisi_drm_drv.h"
 
-
 #define PREFERRED_BPP		32
-
 
 static inline
 struct hisi_drm_fbdev *to_hisi_drm_fbdev(struct drm_fb_helper *helper)

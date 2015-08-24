@@ -9,8 +9,8 @@
  *  published by the Free Software Foundation.
  *
  */
-#ifndef __HISI_DRM_DSI_H__
-#define __HISI_DRM_DSI_H__
+#ifndef __HISI_DSI_REG_H__
+#define __HISI_DSI_REG_H__
 
 #define  PWR_UP_ON                   (1)
 #define  PWR_UP_OFF                  (0)       
