@@ -12,30 +12,33 @@
 
 #include <linux/io.h>
 #include <linux/types.h>
+#include <video/videomode.h>
+
 #include <drm/drmP.h>
 #include <drm/drm_crtc_helper.h>
-#include <video/videomode.h>
 #include <drm/drm_encoder_slave.h>
 #include <drm/drm_atomic_helper.h>
 
-#include "hisi_drm_encoder.h"
 #include "hisi_drm_drv.h"
+#include "hisi_drm_encoder.h"
+#include "hisi_drm_connector.h"
 
-#define get_hisi_connector(connector) \
+#define to_hisi_connector(connector) \
 	container_of(connector, struct hisi_connector, connector)
 
 int hisi_drm_connector_mode_valid(struct drm_connector *connector,
 					  struct drm_display_mode *mode)
 {
-	struct hisi_connector *hisi_connector = get_hisi_connector(connector);
-	struct drm_encoder *encoder = hisi_connector->encoder;
+	struct hisi_connector *hconnector = to_hisi_connector(connector);
+	struct drm_encoder *encoder = hconnector->encoder;
+	struct hisi_connector_funcs *ops = hconnector->ops;
 	struct drm_encoder_slave_funcs *sfuncs = get_slave_funcs(encoder);
 	int ret = MODE_OK;
 
 	DRM_DEBUG_DRIVER("enter.\n");
 
-	if (hisi_connector->ops->modes_valid)
-		hisi_connector->ops->modes_valid(connector);
+	if (ops->modes_valid)
+		ops->modes_valid(connector);
 
 	if (sfuncs && sfuncs->mode_valid) {
 		ret = sfuncs->mode_valid(encoder, mode);
@@ -50,8 +53,8 @@ int hisi_drm_connector_mode_valid(struct drm_connector *connector,
 struct drm_encoder *
 hisi_drm_best_encoder(struct drm_connector *connector)
 {
-	struct hisi_connector *hisi_connector = get_hisi_connector(connector);
-	struct drm_encoder *encoder = hisi_connector->encoder;
+	struct hisi_connector *hconnector = to_hisi_connector(connector);
+	struct drm_encoder *encoder = hconnector->encoder;
 
 	DRM_DEBUG_DRIVER("enter.\n");
 	DRM_DEBUG_DRIVER("exit success.\n");
@@ -61,9 +64,8 @@ hisi_drm_best_encoder(struct drm_connector *connector)
 
 int hisi_drm_get_modes(struct drm_connector *connector)
 {
-	struct hisi_connector *hisi_connector = get_hisi_connector(connector);
-	struct drm_encoder *encoder = hisi_connector->encoder;
-	struct drm_encoder_slave_funcs *sfuncs = get_slave_funcs(encoder);
+	struct hisi_connector *hconnector = to_hisi_connector(connector);
+	struct hisi_connector_funcs *ops = hconnector->ops;
 	int count = 0;
 
 	DRM_DEBUG_DRIVER("enter.\n");
@@ -72,8 +74,8 @@ int hisi_drm_get_modes(struct drm_connector *connector)
 	if (sfuncs && sfuncs->get_modes)
 		count = sfuncs->get_modes(encoder, connector);
 #else
-	if (hisi_connector->ops->get_modes)
-		count += hisi_connector->ops->get_modes(connector);
+	if (ops->get_modes)
+		count += ops->get_modes(connector);
 #endif
 
 
@@ -97,15 +99,16 @@ void hisi_drm_connector_destroy(struct drm_connector *connector)
 enum drm_connector_status
 hisi_drm_detect(struct drm_connector *connector, bool force)
 {
-	struct hisi_connector *hisi_connector = get_hisi_connector(connector);
-	struct drm_encoder *encoder = hisi_connector->encoder;
+	struct hisi_connector *hconnector = to_hisi_connector(connector);
+	struct drm_encoder *encoder = hconnector->encoder;
+	struct hisi_connector_funcs *ops = hconnector->ops;
 	struct drm_encoder_slave_funcs *sfuncs = get_slave_funcs(encoder);
 	enum drm_connector_status status = connector_status_unknown;
 
 	DRM_DEBUG_DRIVER("enter.\n");
 
-	if (hisi_connector->ops->detect)
-		hisi_connector->ops->detect(connector);
+	if (ops->detect)
+		ops->detect(connector);
 
 	if (sfuncs && sfuncs->detect)
 		status = sfuncs->detect(encoder, connector);
@@ -113,6 +116,7 @@ hisi_drm_detect(struct drm_connector *connector, bool force)
 	DRM_DEBUG_DRIVER("exit success. status=%d\n", status);
 	return status;
 }
+
 static struct drm_connector_funcs hisi_drm_connector_funcs = {
 	.dpms = drm_atomic_helper_connector_dpms,
 	.fill_modes = drm_helper_probe_single_connector_modes,

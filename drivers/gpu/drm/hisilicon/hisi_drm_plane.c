@@ -11,16 +11,75 @@
  */
 
 #include <drm/drmP.h>
-
-#include <drm/drm_crtc.h>
 #include <drm/drm_plane_helper.h>
 #include <drm/drm_atomic_helper.h>
 
-#include <drm/drm_encoder_slave.h>
 #include "hisi_drm_drv.h"
-
-#include "hisi_ade.h"
 #include "hisi_drm_plane.h"
+#include "hisi_drm_crtc.h"
+#include "hisi_ade.h"
+
+#define to_hisi_plane(plane) \
+		container_of(plane, struct hisi_plane, base)
+
+static void hisi_plane_atomic_disable(struct drm_plane *plane,
+			       struct drm_plane_state *old_state)
+{
+	struct hisi_plane *hplane = to_hisi_plane(plane);
+	struct hisi_plane_funcs *ops = hplane->ops;
+
+	DRM_DEBUG_DRIVER("enter.\n");
+
+	if (!old_state->crtc)
+		return;
+	
+	if (ops->atomic_disable)
+		ops->atomic_disable(hplane, old_state);
+
+	DRM_DEBUG_DRIVER("exit success.\n");
+}
+
+static void hisi_plane_atomic_update(struct drm_plane *plane,
+				       struct drm_plane_state *old_state)
+{
+	struct hisi_plane *hplane = to_hisi_plane(plane);
+	struct hisi_plane_funcs *ops = hplane->ops;
+	struct drm_plane_state	*hstate	= plane->state;
+
+	DRM_DEBUG_DRIVER("enter.\n");
+	if (!hstate->crtc)
+		return;
+	
+	if (ops->atomic_update)
+		ops->atomic_update(hplane, old_state);
+
+	DRM_DEBUG_DRIVER("exit success.\n");
+}
+
+int hisi_plane_atomic_check(struct drm_plane *plane,
+				     struct drm_plane_state *state)
+{
+	DRM_DEBUG_DRIVER("enter.\n");
+	DRM_DEBUG_DRIVER("exit success.\n");
+	return 0;
+}
+
+void hisi_plane_cleanup_fb(struct drm_plane *plane,
+				struct drm_framebuffer *fb,
+				const struct drm_plane_state *old_state)
+{
+	DRM_DEBUG_DRIVER("enter.\n");
+	DRM_DEBUG_DRIVER("exit success.\n");
+}
+
+int hisi_plane_prepare_fb(struct drm_plane *p,
+				struct drm_framebuffer *fb,
+				const struct drm_plane_state *new_state)
+{
+	DRM_DEBUG_DRIVER("enter.\n");
+	DRM_DEBUG_DRIVER("exit success.\n");
+	return 0;
+}
 
 static const struct drm_plane_helper_funcs hisi_plane_helper_funcs = {
 	.prepare_fb = hisi_plane_prepare_fb,
@@ -30,10 +89,15 @@ static const struct drm_plane_helper_funcs hisi_plane_helper_funcs = {
 	.atomic_disable = hisi_plane_atomic_disable,
 };
 
+void hisi_plane_destroy(struct drm_plane *plane)
+{
+	drm_plane_cleanup(plane);
+}
+
 static void hisi_plane_atomic_reset(struct drm_plane *plane)
 {
 	struct hisi_plane *hplane = to_hisi_plane(plane);
-	struct hisi_plane_state *state;
+	struct hisi_plane_state *hstate;
 
 	if (plane->state && plane->state->fb)
 		drm_framebuffer_unreference(plane->state->fb);
@@ -41,31 +105,31 @@ static void hisi_plane_atomic_reset(struct drm_plane *plane)
 	kfree(plane->state);
 	plane->state = NULL;
 
-	state = kzalloc(sizeof(*state), GFP_KERNEL);
-	if (state == NULL)
+	hstate = kzalloc(sizeof(*hstate), GFP_KERNEL);
+	if (hstate == NULL)
 		return;
 
 	/* set to default value */
-	state->zpos = hplane->ch;
-	state->base.rotation = BIT(DRM_ROTATE_0);
-	state->alpha = 255;
-	state->blending = ALPHA_BLENDING_NONE;
+	hstate->zpos = hplane->ch;
+	hstate->base.rotation = BIT(DRM_ROTATE_0);
+	hstate->alpha = 255;
+	hstate->blending = ALPHA_BLENDING_NONE;
 
-	plane->state = &state->base;
+	plane->state = &hstate->base;
 	plane->state->plane = plane;
 }
 
 static struct drm_plane_state *
 hisi_plane_atomic_duplicate_state(struct drm_plane *plane)
 {
-	struct hisi_plane_state *state;
+	struct hisi_plane_state *hstate;
 	struct hisi_plane_state *copy;
 
 	if (WARN_ON(!plane->state))
 		return NULL;
 
-	state = to_hisi_plane_state(plane->state);
-	copy = kmemdup(state, sizeof(*state), GFP_KERNEL);
+	hstate = to_hisi_plane_state(plane->state);
+	copy = kmemdup(hstate, sizeof(*hstate), GFP_KERNEL);
 	if (copy == NULL)
 		return NULL;
 
@@ -87,12 +151,8 @@ static int hisi_plane_atomic_set_property(struct drm_plane *plane,
 					  struct drm_property *property,
 					  uint64_t val)
 {
-	struct hisi_plane *hplane = to_hisi_plane(plane);
 	struct hisi_drm_private *priv = plane->dev->dev_private;
 	struct hisi_plane_state *hstate = to_hisi_plane_state(state);
-
-	DRM_DEBUG_DRIVER("\"%s\": channel%d, val=%d\n", property->name,
-			hplane->ch, val);
 
 	if (property == priv->zpos_prop)
 		hstate->zpos = val;
@@ -138,39 +198,35 @@ static struct drm_plane_funcs hisi_plane_funcs = {
 	.atomic_get_property = hisi_plane_atomic_get_property,
 };
 
-struct hisi_plane *hisi_drm_plane_init(struct drm_device *dev,
-					   void *ctx,
-					   u32 ch,
-					   const u32 *formats,
-					   u32 formats_cnt,
-					   enum drm_plane_type type)
+int hisi_drm_plane_init(struct drm_device *dev,
+			struct hisi_plane *hplane,
+				enum drm_plane_type type)
 {
-	struct hisi_plane *plane;
-	int ret;
+	struct hisi_plane_funcs *ops = hplane->ops;
+	const u32 *fmts;
+	u32 fmts_cnt;
+	int ret = 0;
 
-	plane = devm_kzalloc(dev->dev, sizeof(*plane), GFP_KERNEL);
-	if (!plane)
-		return ERR_PTR(-ENOMEM);
-	
-	plane->ctx = ctx;
-	plane->ch = ch;
-	
-	DRM_DEBUG_DRIVER("plane init: ch=%d,type=%d, formats_count=%d\n",
-			ch, type, formats_cnt);
-	ret = drm_universal_plane_init(dev, &plane->base, 1,
-					&hisi_plane_funcs,
-					formats,
-					formats_cnt,
-					type);
+	/* get  properties */
+	fmts_cnt = ops->get_properties(hplane->ch, &fmts);
+	if (ret)
+		return ret;
+
+	ret = drm_universal_plane_init(dev, &hplane->base, 1,
+				&hisi_plane_funcs, fmts, fmts_cnt, type);
 	if (ret) {
-		DRM_ERROR("fail to init plane\n");
-		return ERR_PTR(ret);
+		DRM_ERROR("fail to init plane, ch=%d\n", hplane->ch);
+		return ret;
 	}
 
-	drm_plane_helper_add(&plane->base, &hisi_plane_helper_funcs);
+	drm_plane_helper_add(&hplane->base, &hisi_plane_helper_funcs);
 
 	/* install  properties */
-	ade_install_plane_properties(dev, plane);
-	
-	return plane;
+	if (ops->install_properties) {
+		ret = ops->install_properties(dev, hplane);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
 }

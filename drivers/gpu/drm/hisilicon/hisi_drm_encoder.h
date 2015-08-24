@@ -13,6 +13,23 @@
 #ifndef __HISI_DRM_ENCODER_H__
 #define __HISI_DRM_ENCODER_H__
 
+struct hisi_encoder_funcs {
+	void (*destroy)(struct drm_encoder *encoder);
+	bool (*mode_fixup)(struct drm_encoder *encoder,
+				const struct drm_display_mode *mode,
+				struct drm_display_mode *adjusted_mode);
+	void (*mode_set)(struct drm_encoder *encoder,
+					struct drm_display_mode *mode,
+					struct drm_display_mode *adjusted_mode);
+	void (*enable)(struct drm_encoder *encoder);
+	void (*disable)(struct drm_encoder *encoder);
+};
+
+struct hisi_encoder {
+	struct drm_encoder_slave base;
+	void *ops;
+};
+
 static inline struct drm_encoder_slave_funcs *
 		get_slave_funcs(struct drm_encoder *enc)
 {
